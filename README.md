@@ -31,6 +31,7 @@ Special thanks to the [LINUX DO](https://linux.do) community for the platform of
 - **两层鉴权** — 管理后台密钥与外部 API Key 分开配置
 - **SQLite 持久化** — 账号、API Key、全局配置全部存入本地数据库
 - **WebUI 控制台** — Dashboard、账号管理、API Key 管理、Playground、服务日志
+- **模型观测页** — 拉取当前区域模型目录，查看近 24 小时实际访问的成功率/首字节/总耗时，并对选中模型做短请求测速
 - **独立文档站** — `/documents` 提供中英文 Wiki，支持本地搜索和目录跳转
 - **自动检测语言** — 根据浏览器地区自动切换中文/英文
 
@@ -67,6 +68,15 @@ cp .env.example .env
 QODER_ADMIN_PASSWORD=your-strong-password
 ```
 
+如果使用中国区 Qoder，请同时设置：
+
+```env
+QODER_REGION=cn
+QODER_PAT=pt-...
+```
+
+中国区 PAT 在 `qoder.com.cn/account/integrations` 获取；国际区 PAT 在 `qoder.com/account/integrations` 获取。`dt-`、`drt-`、`jt-`、`jrt-` 是登录态或 job token，不是可直接提交到 **Add PAT** 的 PAT。
+
 > **默认密码是 `admin`，强烈建议第一次登录后立即修改。**
 
 ### 启动 / Start
@@ -83,6 +93,9 @@ uv run qoder2api
 | `/console` | 管理控制台 |
 | `/documents` | 文档站 / Wiki |
 | `/v1/chat/completions` | OpenAI 兼容 API |
+| `/v1/models` | OpenAI 兼容模型列表 |
+
+控制台的 **模型页** 默认按当前区域显示模型目录。测速使用当前激活账号发送短请求，会消耗少量 Qoder 额度；测速事件会单独标记，不会混入生产流量健康统计。
 
 ### 第一次 API 调用 / First API Call
 
@@ -106,6 +119,7 @@ curl http://127.0.0.1:5050/v1/chat/completions \
 | `QODER_PORT` | 服务端口 | `5050` |
 | `QODER_ADMIN_PASSWORD` | 管理员密码（覆盖 SQLite 存储值） | `admin` |
 | `QODER_PROXY` | 出站代理地址 | 空 |
+| `QODER_REGION` | Qoder 区域：`global` 或 `cn` | `global` |
 | `QODER_ENABLE_DOCUMENTS` | 是否启用文档页 | `1` |
 | `QODER_ENABLE_LANDING` | 是否启用 Landing Page | `1` |
 | `QODER_PAT` | 首次启动时自动导入的 PAT | 空 |
@@ -118,6 +132,8 @@ curl http://127.0.0.1:5050/v1/chat/completions \
 │   ├── accounts.py         # SQLite 账号管理
 │   ├── auth.py             # Qoder 鉴权与签名
 │   ├── bridge.py           # OpenAI 兼容响应转换
+│   ├── models.py           # 模型目录与测速
+│   ├── telemetry.py        # 请求耗时与近期访问统计
 │   ├── config.py           # 配置读写
 │   ├── database.py         # SQLite schema
 │   ├── env.py              # 环境变量加载

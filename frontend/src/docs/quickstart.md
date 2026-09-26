@@ -54,6 +54,8 @@ Then set a strong administrator password in `.env`:
 QODER_ADMIN_PASSWORD=your-strong-password
 ```
 
+For Qoder China, also set `QODER_REGION=cn` before adding a CN PAT. Use a `pt-` Personal Access Token from the matching region's integrations page; `dt-`, `drt-`, `jt-`, and `jrt-` values are session or job tokens.
+
 This password protects all management routes under `/ui/*` with the `X-Gateway-Token` header.
 
 ## Manage Qoder Accounts

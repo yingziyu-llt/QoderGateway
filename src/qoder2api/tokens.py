@@ -1,5 +1,5 @@
 """
-Token 刷新与限额查询（openapi.qoder.sh）
+Token 刷新与限额查询（按账号区域选择 Qoder OpenAPI）
 
 - 刷新：POST /api/v1/deviceToken/refresh（drt-）或 /api/v1/jobToken/refresh（jrt-）
 - 限额：GET /api/v2/quota/usage
@@ -14,8 +14,9 @@ from typing import Any
 import httpx
 
 from .database import get_db
+from .env import httpx_client_kwargs
+from .regions import get_region, normalize_region
 
-OPENAPI = "https://openapi.qoder.sh"
 UA = "qoder/1.1.16"
 REFRESH_INTERVAL = 6 * 3600  # 6 小时
 
@@ -28,11 +29,43 @@ def _headers() -> dict[str, str]:
     }
 
 
+def _exchange_cn_pat(pat: str) -> dict[str, Any]:
+    config = get_region("cn")
+    response = httpx.post(
+        f"{config.openapi_url}/api/v1/jobToken/exchange",
+        json={"personal_token": pat},
+        headers={**_headers(), "Cosy-Version": "1.0.1", "Cosy-ClientType": "5"},
+        timeout=25,
+        **httpx_client_kwargs(),
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"HTTP {response.status_code}: {response.text[:160]}")
+    data = response.json()
+    if not data.get("token"):
+        raise RuntimeError("响应缺少 token")
+    return data
+
+
+def _save_refreshed_tokens(uid: str, data: dict[str, Any], fallback_refresh: str) -> dict[str, Any]:
+    new_tok = str(data.get("token") or data.get("device_token") or "").strip()
+    new_rt = str(data.get("refresh_token") or fallback_refresh).strip()
+    if not new_tok:
+        return {"ok": False, "uid": uid, "error": "响应缺少 token"}
+    expires_at = data.get("expires_at") or ""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE accounts SET security_oauth_token = ?, refresh_token = ?, "
+            "token_expires_at = ?, last_status = 'ok', last_error = NULL WHERE uid = ?",
+            (new_tok, new_rt, expires_at, uid),
+        )
+    return {"ok": True, "uid": uid, "expires_at": expires_at}
+
+
 def refresh_one_account(uid: str) -> dict[str, Any]:
-    """用 refresh_token 刷新单个账号的 dt-/drt-，并回写数据库。"""
+    """Refresh one account using the endpoint and token format for its region."""
     with get_db() as conn:
         row = conn.execute(
-            "SELECT uid, name, refresh_token FROM accounts WHERE uid = ?", (uid,)
+            "SELECT uid, name, refresh_token, security_oauth_token, region FROM accounts WHERE uid = ?", (uid,)
         ).fetchone()
     if not row:
         return {"ok": False, "uid": uid, "error": "账号不存在"}
@@ -40,16 +73,42 @@ def refresh_one_account(uid: str) -> dict[str, Any]:
     if not rt:
         return {"ok": False, "uid": uid, "error": "无 refresh_token"}
 
+    region = normalize_region(row["region"] if "region" in row.keys() else "global")
+    if region == "cn":
+        try:
+            if rt.startswith("pat|"):
+                parts = rt.split("|")
+                pat = parts[1] if len(parts) > 1 else ""
+                if not pat:
+                    return {"ok": False, "uid": uid, "error": "PAT refresh 记录格式无效"}
+                data = _exchange_cn_pat(pat)
+            else:
+                response = httpx.post(
+                    get_region("cn").refresh_url,
+                    json={"refreshToken": rt},
+                    headers={**_headers(), "Authorization": f"Bearer {row['security_oauth_token']}"},
+                    timeout=25,
+                    **httpx_client_kwargs(),
+                )
+                if response.status_code != 200:
+                    return {"ok": False, "uid": uid, "error": f"HTTP {response.status_code}: {response.text[:160]}"}
+                data = response.json()
+            result = _save_refreshed_tokens(uid, data, rt)
+            result["name"] = row["name"]
+            return result
+        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+            return {"ok": False, "uid": uid, "error": str(exc)}
+
     # drt- → deviceToken/refresh；jrt- → jobToken/refresh
     if rt.startswith("jrt-"):
-        url = f"{OPENAPI}/api/v1/jobToken/refresh"
+        url = f"{get_region('global').openapi_url}/api/v1/jobToken/refresh"
         token_key = "token"
     else:
-        url = f"{OPENAPI}/api/v1/deviceToken/refresh"
+        url = f"{get_region('global').openapi_url}/api/v1/deviceToken/refresh"
         token_key = "device_token"
 
     try:
-        r = httpx.post(url, json={"refresh_token": rt}, headers=_headers(), timeout=25)
+        r = httpx.post(url, json={"refresh_token": rt}, headers=_headers(), timeout=25, **httpx_client_kwargs())
     except httpx.HTTPError as e:
         return {"ok": False, "uid": uid, "error": f"网络错误: {e}"}
 
@@ -89,21 +148,23 @@ def refresh_all_account_tokens() -> dict[str, Any]:
 
 
 def get_account_quota(uid: str) -> dict[str, Any]:
-    """查询单个账号限额（GET /api/v2/quota/usage）。"""
+    """Query one account's regional quota endpoint."""
     with get_db() as conn:
         row = conn.execute(
-            "SELECT uid, name, security_oauth_token FROM accounts WHERE uid = ?", (uid,)
+            "SELECT uid, name, security_oauth_token, region FROM accounts WHERE uid = ?", (uid,)
         ).fetchone()
     if not row:
         return {"ok": False, "uid": uid, "error": "账号不存在"}
     tok = row["security_oauth_token"] or ""
     if not tok:
         return {"ok": False, "uid": uid, "error": "无 token"}
+    region = normalize_region(row["region"] if "region" in row.keys() else "global")
     try:
         r = httpx.get(
-            f"{OPENAPI}/api/v2/quota/usage",
+            get_region(region).quota_url,
             headers={"Authorization": f"Bearer {tok}", "Accept": "application/json"},
             timeout=20,
+            **httpx_client_kwargs(),
         )
     except httpx.HTTPError as e:
         return {"ok": False, "uid": uid, "error": f"网络错误: {e}"}

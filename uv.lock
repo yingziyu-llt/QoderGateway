@@ -812,22 +812,27 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
-    { name = "drissionpage" },
     { name = "fastapi" },
     { name = "httpx" },
-    { name = "pypiwin32" },
     { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.optional-dependencies]
+registrar = [
+    { name = "drissionpage" },
+    { name = "pypiwin32", marker = "sys_platform == 'win32'" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=43.0.0" },
-    { name = "drissionpage", specifier = ">=4.1.1.4" },
+    { name = "drissionpage", marker = "extra == 'registrar'", specifier = ">=4.1.1.4" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "pypiwin32", specifier = ">=223" },
+    { name = "pypiwin32", marker = "sys_platform == 'win32' and extra == 'registrar'", specifier = ">=223" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.6" },
 ]
+provides-extras = ["registrar"]
 
 [[package]]
 name = "requests"

@@ -1,6 +1,7 @@
 import argparse
 import collections
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,9 @@ from .tokens import (
     get_all_accounts_quota,
     start_refresh_loop,
 )
+from .regions import configured_region, normalize_region
+from .models import benchmark_model, discover_models
+from .telemetry import get_model_metrics, record_request
 
 BASE_DIR = os.path.dirname(__file__)
 INDEX_HTML = Path(BASE_DIR) / "static" / "index.html"
@@ -52,6 +56,19 @@ def add_log(msg: str, level: str = "INFO") -> None:
     formatted = f"[{timestamp}] [{level}] {msg}"
     logs_queue.append(formatted)
     print(formatted)
+
+
+def _safe_record_request(**kwargs: Any) -> None:
+    """Metrics must never make an otherwise successful request fail."""
+    try:
+        record_request(**kwargs)
+    except Exception as exc:
+        add_log(f"Request telemetry unavailable: {exc}", "WARNING")
+
+
+def _status_code(exc: Exception) -> int | None:
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None)
 
 
 # Add initial logs
@@ -84,17 +101,17 @@ async def get_session() -> SessionContext:
         if pat:
             add_log("No accounts stored. Importing QODER_PAT from environment...")
             try:
-                sess = await create_session(pat)
+                sess = await create_session(pat, configured_region())
                 with get_db() as conn:
                     conn.execute(
                         """
                         INSERT OR REPLACE INTO accounts (
                             uid, name, user_type, security_oauth_token, refresh_token, machine_id,
-                            enabled, last_status, last_error
-                        ) VALUES (?, ?, ?, ?, ?, ?, 1, 'ok', NULL)
+                            enabled, last_status, last_error, region
+                        ) VALUES (?, ?, ?, ?, ?, ?, 1, 'ok', NULL, ?)
                         """,
                         (sess.identity.uid, sess.identity.name or "Environment PAT", sess.identity.user_type,
-                         sess.identity.security_oauth_token, sess.identity.refresh_token, sess.machine_id)
+                         sess.identity.security_oauth_token, sess.identity.refresh_token, sess.machine_id, sess.region)
                     )
                 db_set_settings("active_uid", sess.identity.uid)
                 add_log(f"Imported environment PAT as account: {sess.identity.name}")
@@ -273,6 +290,72 @@ async def get_logs(verify: None = Depends(check_gateway_token)) -> list[str]:
     return list(logs_queue)
 
 
+@app.get("/ui/models")
+async def get_models(verify: None = Depends(check_gateway_token)) -> dict[str, Any]:
+    """Return the regional model catalog plus recent gateway timings."""
+    try:
+        # Avoid triggering PAT/local-session auto-import just to render a page.
+        sess = get_active_session()
+    except Exception:
+        sess = None
+    region = normalize_region(sess.region if sess else configured_region())
+    models, source = await discover_models(sess, region)
+    metrics = get_model_metrics()
+    for model in models:
+        model["metrics"] = metrics["by_model"].get(model["id"], {})
+    return {
+        "region": region,
+        "source": source,
+        "models": models,
+        "metrics": metrics,
+        "active_uid": sess.identity.uid if sess else None,
+        "active_name": sess.identity.name if sess else None,
+    }
+
+
+@app.post("/ui/models/benchmark")
+async def benchmark_models(payload: dict[str, Any] | None = None, verify: None = Depends(check_gateway_token)) -> dict[str, Any]:
+    """Benchmark selected models on the active account with a short prompt."""
+    payload = payload or {}
+    try:
+        sess = get_active_session()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"No active account available: {exc}") from exc
+
+    requested = payload.get("models")
+    if requested is None:
+        requested = []
+    if not isinstance(requested, list):
+        raise HTTPException(status_code=400, detail="models must be an array")
+    models: list[str] = []
+    for value in requested:
+        model = str(value or "").strip()
+        if model and model not in models:
+            models.append(model[:160])
+    if not models:
+        catalog, _ = await discover_models(sess, sess.region)
+        models = [str(item["id"]) for item in catalog[:6]]
+    if len(models) > 8:
+        raise HTTPException(status_code=400, detail="最多一次测试 8 个模型")
+
+    prompt = str(payload.get("prompt") or "Reply with exactly: OK").strip()[:240]
+    if not prompt:
+        prompt = "Reply with exactly: OK"
+    results = []
+    for model in models:
+        results.append(await benchmark_model(sess, model, prompt))
+    ok_count = sum(1 for result in results if result.get("ok"))
+    add_log(f"Model benchmark completed: {ok_count}/{len(results)} succeeded on {sess.identity.uid}")
+    return {
+        "status": "ok",
+        "region": sess.region,
+        "account_uid": sess.identity.uid,
+        "account_name": sess.identity.name,
+        "results": results,
+        "metrics": get_model_metrics(),
+    }
+
+
 @app.post("/ui/registrar/start")
 async def registrar_start(payload: dict[str, Any] | None = None, verify: None = Depends(check_gateway_token)) -> dict[str, Any]:
     """启动注册机（无限循环：parents 个母线程 × 每批 3 个子任务，直到调用 stop）。
@@ -319,7 +402,8 @@ async def set_session(payload: dict[str, Any], verify: None = Depends(check_gate
         raise HTTPException(status_code=400, detail="PAT is required")
     try:
         add_log("Attempting to save session from PAT...")
-        sess = await create_session(pat)
+        region = normalize_region(payload.get("region") or configured_region())
+        sess = await create_session(pat, region)
         
         # Insert or update in SQLite
         with get_db() as conn:
@@ -327,11 +411,11 @@ async def set_session(payload: dict[str, Any], verify: None = Depends(check_gate
                 """
                 INSERT OR REPLACE INTO accounts (
                     uid, name, user_type, security_oauth_token, refresh_token, machine_id,
-                    enabled, last_status, last_error
-                ) VALUES (?, ?, ?, ?, ?, ?, 1, 'ok', ?)
+                    enabled, last_status, last_error, region
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, 'ok', ?, ?)
                 """,
                 (sess.identity.uid, sess.identity.name or "PAT Account", sess.identity.user_type,
-                 sess.identity.security_oauth_token, sess.identity.refresh_token, sess.machine_id, None)
+                 sess.identity.security_oauth_token, sess.identity.refresh_token, sess.machine_id, None, sess.region)
             )
             
         db_set_settings("active_uid", sess.identity.uid)
@@ -377,6 +461,36 @@ def is_account_error(exc: Exception) -> bool:
     return False
 
 
+@app.get("/v1/models")
+async def public_models(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    """OpenAI-compatible model listing for clients and the console."""
+    config = load_config()
+    if config.get("auth_required", False):
+        allowed_keys = config.get("allowed_keys", [])
+        incoming_key = authorization[len("Bearer "):].strip() if authorization and authorization.startswith("Bearer ") else None
+        if not incoming_key or incoming_key not in allowed_keys:
+            raise HTTPException(status_code=401, detail="Invalid or missing API Key")
+    try:
+        sess = get_active_session()
+    except Exception:
+        sess = None
+    region = normalize_region(sess.region if sess else configured_region())
+    models, _ = await discover_models(sess, region)
+    created = int(time.time())
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": model["id"],
+                "object": "model",
+                "created": created,
+                "owned_by": f"qoder-{region}",
+            }
+            for model in models
+        ],
+    }
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(payload: dict[str, Any], authorization: str | None = Header(default=None)):
     config = load_config()
@@ -394,28 +508,50 @@ async def chat_completions(payload: dict[str, Any], authorization: str | None = 
     stream = bool(payload.get("stream", False))
     messages_count = len(payload.get("messages", []))
     add_log(f"Incoming completion request: model={model}, stream={stream}, messages={messages_count}")
-    
     accounts_data = db_load_accounts()
     enabled_count = sum(1 for acc in accounts_data["accounts"] if acc.get("enabled", True))
     max_retries = max(1, enabled_count)
     
     for attempt in range(max_retries):
+        attempt_started = time.perf_counter()
+        sess: SessionContext | None = None
         try:
             sess = await get_session()
             add_log(f"Request routing via account: {sess.identity.name} ({sess.identity.uid})")
             if stream:
                 gen = stream_openai_response(payload, sess)
+                first_received_at: float | None = None
                 try:
                     first_item = await gen.__anext__()
+                    first_received_at = time.perf_counter()
                 except StopAsyncIteration:
                     first_item = None
-                
+
                 async def stream_success_wrapper(first, g):
-                    if first is not None:
-                        yield first
-                    async for chunk in g:
-                        yield chunk
-                
+                    success = False
+                    stream_error: Exception | None = None
+                    try:
+                        if first is not None:
+                            yield first
+                        async for chunk in g:
+                            yield chunk
+                        success = True
+                    except Exception as exc:
+                        stream_error = exc
+                        raise
+                    finally:
+                        _safe_record_request(
+                            model=str(model),
+                            account_uid=sess.identity.uid,
+                            region=sess.region,
+                            source="proxy",
+                            success=success,
+                            total_ms=(time.perf_counter() - attempt_started) * 1000,
+                            ttft_ms=((first_received_at - attempt_started) * 1000) if first_received_at else None,
+                            status_code=200 if success else _status_code(stream_error) if stream_error else None,
+                            error=str(stream_error)[:500] if stream_error else None,
+                        )
+
                 add_log(f"Streaming response initiated (Attempt {attempt+1}/{max_retries}).")
                 return StreamingResponse(
                     stream_success_wrapper(first_item, gen),
@@ -426,9 +562,28 @@ async def chat_completions(payload: dict[str, Any], authorization: str | None = 
                 add_log(f"Generating full completion response (Attempt {attempt+1}/{max_retries})...")
                 resp = await complete_openai_response(payload, sess)
                 add_log("Completion request finished successfully.")
+                _safe_record_request(
+                    model=str(model),
+                    account_uid=sess.identity.uid,
+                    region=sess.region,
+                    source="proxy",
+                    success=True,
+                    total_ms=(time.perf_counter() - attempt_started) * 1000,
+                    status_code=200,
+                )
                 return resp
         except Exception as exc:
-            current_uid = sess.identity.uid if 'sess' in locals() else "unknown"
+            current_uid = sess.identity.uid if sess is not None else "unknown"
+            _safe_record_request(
+                model=str(model),
+                account_uid=sess.identity.uid if sess is not None else None,
+                region=sess.region if sess is not None else configured_region(),
+                source="proxy",
+                success=False,
+                total_ms=(time.perf_counter() - attempt_started) * 1000,
+                status_code=_status_code(exc),
+                error=str(exc),
+            )
             if is_account_error(exc):
                 if is_quota_error(exc):
                     # quota 类错误：先发一次请求确认是否真正 exceeded，而不是直接跳过

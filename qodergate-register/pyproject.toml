@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "DrissionPage>=4.1.1",
     "httpx>=0.27.0",
-    "pypiwin32>=223",
+    "pypiwin32>=223; sys_platform == 'win32'",
 ]
 
 [project.scripts]

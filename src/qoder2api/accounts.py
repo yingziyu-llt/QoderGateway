@@ -11,6 +11,7 @@ from .auth import (
     fetch_user_status
 )
 from .database import get_db
+from .regions import configured_region, normalize_region
 
 
 def db_get_settings(key: str, default: str | None = None) -> str | None:
@@ -57,7 +58,8 @@ async def import_current_auth() -> dict[str, Any]:
             sess.identity.uid,
             sess.machine_id,
             sess.machine_token,
-            sess.machine_type
+            sess.machine_type,
+            sess.region,
         )
         quota_val = status_data.get("quota", 0)
         is_exceeded = 1 if status_data.get("isQuotaExceeded", False) else 0
@@ -81,13 +83,13 @@ async def import_current_auth() -> dict[str, Any]:
             INSERT OR REPLACE INTO accounts (
                 uid, name, user_type, security_oauth_token, refresh_token, machine_id,
                 enabled, last_status, last_error, quota, is_quota_exceeded, plan,
-                user_tag, next_reset_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                user_tag, next_reset_at, region
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 uid, name, sess.identity.user_type, sess.identity.security_oauth_token,
                 sess.identity.refresh_token, sess.machine_id, enabled, "ok", None,
-                quota_val, is_exceeded, plan_val, user_tag_val, next_reset
+                quota_val, is_exceeded, plan_val, user_tag_val, next_reset, sess.region
             )
         )
 
@@ -106,7 +108,8 @@ async def import_current_auth() -> dict[str, Any]:
         "is_quota_exceeded": bool(is_exceeded),
         "plan": plan_val,
         "user_tag": user_tag_val,
-        "next_reset_at": next_reset
+        "next_reset_at": next_reset,
+        "region": sess.region,
     }
 
 
@@ -134,8 +137,8 @@ def batch_import_accounts(records: list[dict]) -> dict:
                 """
                 INSERT OR REPLACE INTO accounts (
                     uid, name, user_type, security_oauth_token, refresh_token, machine_id,
-                    enabled, last_status, last_error, quota, is_quota_exceeded, plan, user_tag, next_reset_at, token_expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ok', NULL, 0, 0, 'PLAN_TIER_PRO_TRIAL', 'Pro Trial', NULL, ?)
+                    enabled, last_status, last_error, quota, is_quota_exceeded, plan, user_tag, next_reset_at, token_expires_at, region
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ok', NULL, 0, 0, 'PLAN_TIER_PRO_TRIAL', 'Pro Trial', NULL, ?, ?)
                 """,
                 (
                     uid,
@@ -146,6 +149,7 @@ def batch_import_accounts(records: list[dict]) -> dict:
                     str(uuid.uuid4()),
                     enabled,
                     str(rec.get("expires_at") or ""),
+                    normalize_region(rec.get("region") or configured_region()),
                 ),
             )
             imported += 1
@@ -189,12 +193,14 @@ def get_active_session() -> SessionContext:
         refresh_token=account["refresh_token"]
     )
     
-    _, machine_token, machine_type = new_machine()
+    region = normalize_region(account.get("region"))
+    _, machine_token, machine_type = new_machine(region)
     return new_session(
         identity,
         account["machine_id"],
         machine_token,
-        machine_type
+        machine_type,
+        region,
     )
 
 
@@ -234,10 +240,12 @@ def rotate_next_account(failed_uid: str, error_msg: str) -> SessionContext:
         security_oauth_token=next_acc["security_oauth_token"],
         refresh_token=next_acc["refresh_token"]
     )
-    _, machine_token, machine_type = new_machine()
+    region = normalize_region(next_acc.get("region"))
+    _, machine_token, machine_type = new_machine(region)
     return new_session(
         identity,
         next_acc["machine_id"],
         machine_token,
-        machine_type
+        machine_type,
+        region,
     )

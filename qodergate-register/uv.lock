@@ -420,14 +420,14 @@ source = { editable = "." }
 dependencies = [
     { name = "drissionpage" },
     { name = "httpx" },
-    { name = "pypiwin32" },
+    { name = "pypiwin32", marker = "sys_platform == 'win32'" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "drissionpage", specifier = ">=4.1.1" },
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "pypiwin32", specifier = ">=223" },
+    { name = "pypiwin32", marker = "sys_platform == 'win32'", specifier = ">=223" },
 ]
 
 [[package]]

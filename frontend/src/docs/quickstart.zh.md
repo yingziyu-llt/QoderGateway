@@ -54,6 +54,12 @@ mv .env.example .env
 QODER_ADMIN_PASSWORD=your-strong-password
 ```
 
+如果你使用中国区 Qoder，还要设置区域：
+
+```env
+QODER_REGION=cn
+```
+
 这个密码用于保护所有 `/ui/*` 管理接口，前端会自动把它作为 `X-Gateway-Token` 发送。
 
 ## 管理 Qoder 账号
@@ -62,6 +68,8 @@ QODER_ADMIN_PASSWORD=your-strong-password
 
 - 点击 **Auto Import**，从本机 Qoder auth 会话自动导入。
 - 在 **Add PAT** 中粘贴 Qoder Personal Access Token。
+
+CN PAT 从 `qoder.com.cn/account/integrations` 获取，国际区 PAT 从 `qoder.com/account/integrations` 获取。`dt-`、`drt-`、`jt-`、`jrt-` 是登录态或 job token，不是 PAT。
 
 导入后的账号会存入本地 SQLite，并按 `uid` 自动去重。
 

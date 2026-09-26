@@ -37,7 +37,8 @@ def init_db():
                 is_quota_exceeded INTEGER DEFAULT 0,
                 plan TEXT,
                 user_tag TEXT,
-                next_reset_at INTEGER
+                next_reset_at INTEGER,
+                region TEXT NOT NULL DEFAULT 'global'
             )
             """
         )
@@ -75,6 +76,40 @@ def init_db():
         try:
             conn.execute("ALTER TABLE accounts ADD COLUMN token_expires_at TEXT")
         except Exception:
+            pass
+
+        # Region was added after the initial schema. Existing accounts remain
+        # compatible and continue to use the international endpoint by default.
+        try:
+            conn.execute("ALTER TABLE accounts ADD COLUMN region TEXT NOT NULL DEFAULT 'global'")
+        except Exception:
+            pass
+
+        # Recent model/request telemetry. Prompt and response bodies are never
+        # stored; this table only keeps timings and routing metadata.
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS request_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at REAL NOT NULL,
+                    model TEXT NOT NULL,
+                    account_uid TEXT,
+                    region TEXT,
+                    source TEXT NOT NULL DEFAULT 'proxy',
+                    success INTEGER NOT NULL DEFAULT 0,
+                    status_code INTEGER,
+                    ttft_ms REAL,
+                    total_ms REAL,
+                    error TEXT
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_request_events_created_at ON request_events(created_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_request_events_model ON request_events(model, created_at DESC)")
+        except Exception:
+            # A read-only legacy database must not prevent the gateway from
+            # starting. telemetry.py falls back to an in-process buffer.
             pass
 
 

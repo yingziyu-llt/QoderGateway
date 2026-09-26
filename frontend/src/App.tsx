@@ -17,7 +17,54 @@ interface AccountsConfig { accounts: Account[]; active_uid: string | null }
 interface UIStatus { ready: boolean; mode: string; username: string | null; uid: string | null; user_type: string | null; error: string | null; accounts_count: number }
 interface APIConfig { auth_required: boolean; allowed_keys: string[] }
 interface Message { role: 'user' | 'assistant'; content: string }
-type TabId = 'dashboard' | 'accounts' | 'playground' | 'api-keys' | 'logs' | 'register'
+interface ModelMetrics {
+  requests?: number
+  successes?: number
+  failures?: number
+  success_rate?: number | null
+  avg_ttft_ms?: number | null
+  p95_ttft_ms?: number | null
+  avg_total_ms?: number | null
+  p95_total_ms?: number | null
+  last_used_at?: number | null
+}
+interface ModelInfo {
+  id: string
+  label: string
+  key: string
+  source: string
+  available: boolean
+  metrics: ModelMetrics
+}
+interface ModelRecentRequest {
+  created_at: number
+  model: string
+  account_uid: string | null
+  region: string | null
+  source: string
+  success: boolean
+  status_code: number | null
+  ttft_ms: number | null
+  total_ms: number | null
+  error: string | null
+}
+interface ModelsPayload {
+  region: string
+  source: string
+  models: ModelInfo[]
+  active_uid: string | null
+  active_name: string | null
+  metrics: { window_hours: number; total_requests: number; by_model: Record<string, ModelMetrics>; recent: ModelRecentRequest[] }
+}
+interface BenchmarkResult {
+  model: string
+  ok: boolean
+  ttft_ms: number | null
+  total_ms: number | null
+  events: number
+  error: string | null
+}
+type TabId = 'dashboard' | 'accounts' | 'models' | 'playground' | 'api-keys' | 'logs' | 'register'
 type AppTabId = TabId
 type Lang = 'en' | 'zh'
 type ToastType = 'SUCCESS' | 'ERROR' | 'INFO'
@@ -44,6 +91,7 @@ interface RegStatus {
 const NAV_ITEMS: { id: AppTabId; icon: string; label: string }[] = [
   { id: 'dashboard', icon: 'dashboard', label: 'Dashboard' },
   { id: 'accounts', icon: 'account_balance_wallet', label: 'Account Pool' },
+  { id: 'models', icon: 'model_training', label: 'Models' },
   { id: 'playground', icon: 'smart_toy', label: 'AI Playground' },
   { id: 'api-keys', icon: 'vpn_key', label: 'API Key Management' },
   { id: 'register', icon: 'person_add', label: 'Auto Registrar' },
@@ -53,19 +101,20 @@ const NAV_ITEMS: { id: AppTabId; icon: string; label: string }[] = [
 const UI_TEXT = {
   en: {
     nav: {
-      dashboard: 'Dashboard', accounts: 'Account Pool', playground: 'AI Playground', apiKeys: 'API Key Management', logs: 'Logs', register: 'Auto Registrar',
+      dashboard: 'Dashboard', accounts: 'Account Pool', models: 'Models', playground: 'AI Playground', apiKeys: 'API Key Management', logs: 'Logs', register: 'Auto Registrar',
     },
     breadcrumb: {
-      dashboard: 'Control Panel / Overview', accounts: 'Console / Management', playground: 'Playground / Experiment', apiKeys: 'Administration / Security', logs: 'System / Observability', docs: 'Developer Platform / Wiki', register: 'Automation / Registrar',
+      dashboard: 'Control Panel / Overview', accounts: 'Console / Management', models: 'Observability / Models', playground: 'Playground / Experiment', apiKeys: 'Administration / Security', logs: 'System / Observability', docs: 'Developer Platform / Wiki', register: 'Automation / Registrar',
     },
     title: {
-      dashboard: 'System Overview', accounts: 'Account Pool', playground: 'AI Playground', apiKeys: 'API Management', logs: 'Service Logs', docs: 'Documentation', register: 'Auto Registrar',
+      dashboard: 'System Overview', accounts: 'Account Pool', models: 'Models', playground: 'AI Playground', apiKeys: 'API Management', logs: 'Service Logs', docs: 'Documentation', register: 'Auto Registrar',
     },
     common: { docs: 'Docs', support: 'Support', healthy: 'Healthy', offline: 'Offline', signOut: 'Sign Out', refresh: 'Refresh', add: 'Add', delete: 'Delete', copy: 'Copy' },
     dashboard: {
       serviceStatus: 'Service Status', allGatewaysActive: 'All gateways active', noActiveSession: 'No active session', accountPool: 'Account Pool', activeSessions: 'Active Qoder accounts', apiAuth: 'API Auth', openAccess: 'Open access', activeUser: 'Active User', systemBriefing: 'System Briefing', readyBrief: 'Gateway is running. {count} account(s) are available for routing.', notReadyBrief: 'No active session is available. Import an account or add a PAT first.', recentNotifications: 'Recent Notifications', authImportError: 'Auth Import Error', sessionActive: 'Session Active', credentialConfig: 'Credential Configuration', credentialDesc: 'Add a Qoder PAT or import the current local Qoder auth session.', patPlaceholder: 'Enter Qoder PAT...', addPat: 'Add PAT', saving: 'Saving...', autoImport: 'Auto Import',
     },
     accounts: { desc: 'Manage Qoder accounts used by the gateway for request routing and failover.', refreshStatus: 'Refresh Status', importAccounts: 'Import Accounts', search: 'Search accounts...', empty: 'No accounts imported. Click Import Accounts or add a PAT from Dashboard.', showing: 'Showing {count} account(s)' },
+    models: { desc: 'Inspect the regional model catalog, recent traffic, and real response timings.', refresh: 'Refresh Catalog', catalog: 'Catalog', upstream: 'Upstream', gatewayCatalog: 'Gateway catalog', recent24h: 'Recent 24h', requests: 'Requests', activeAccount: 'Active Account', availableModels: 'Available Models', recentTraffic: 'Recent Traffic', benchmark: 'Benchmark Selected', benchmarkAll: 'Benchmark Top Models', benchmarking: 'Testing...', selectAll: 'Select all', selected: 'selected', model: 'Model', source: 'Source', successRate: 'Success', ttft: 'First token', totalTime: 'Total time', lastUsed: 'Last used', noMetrics: 'No traffic yet', noRecent: 'No recent requests', benchmarkResults: 'Benchmark Results', benchmarkHint: 'Tests use a short real request on the active account and consume a small amount of quota.', testPrompt: 'Test prompt', defaultPrompt: 'Reply with exactly: OK', passed: 'Passed', failed: 'Failed', noAccount: 'Add or activate an account before benchmarking.' },
     playground: { modelConfig: 'Model Configuration', streamResponse: 'Stream Response', systemPrompt: 'System Prompt', systemPromptPlaceholder: "Define the AI's persona...", ask: 'Ask anything...', send: 'Send', waiting: 'Waiting for response...' },
     api: { generate: 'Generate New Key', desc: 'Manage authentication keys and gateway access permissions for client requests.', gatewayAuth: 'Gateway Authentication', gatewayAuthDesc: 'Toggle API key validation for incoming /v1 requests.', systemStatus: 'System Status', activeKeys: 'Active Keys', configured: 'configured', activeAccessKeys: 'Active Access Keys', keyPlaceholder: 'Enter or paste a key...', noKeys: 'No API keys configured. Generate one above.', bestPractices: 'Security Best Practices', bestPracticesDesc: 'Do not expose API keys in client-side code. Rotate keys when they appear in logs, screenshots, or shared scripts.', securityPolicy: 'Security Policy' },
     logs: { account: 'Account', status: 'Status', range: 'Range', allAccounts: 'All Accounts', allStatuses: 'All Statuses', last24h: 'Last 24h', lastHour: 'Last hour', last7d: 'Last 7 days', noLogs: 'No logs available', noMatch: 'No logs match current filters', timestamp: 'Timestamp', level: 'Level', message: 'Message' },
@@ -101,19 +150,20 @@ const UI_TEXT = {
   },
   zh: {
     nav: {
-      dashboard: '控制台', accounts: '账号池', playground: '调试对话', apiKeys: 'API Key 管理', logs: '服务日志', register: '自动注册机',
+      dashboard: '控制台', accounts: '账号池', models: '模型页', playground: '调试对话', apiKeys: 'API Key 管理', logs: '服务日志', register: '自动注册机',
     },
     breadcrumb: {
-      dashboard: '控制台 / 概览', accounts: '控制台 / 账号管理', playground: '调试 / 对话测试', apiKeys: '管理 / 安全', logs: '系统 / 日志', docs: '开发者平台 / 文档', register: '自动化 / 注册机',
+      dashboard: '控制台 / 概览', accounts: '控制台 / 账号管理', models: '观测 / 模型', playground: '调试 / 对话测试', apiKeys: '管理 / 安全', logs: '系统 / 日志', docs: '开发者平台 / 文档', register: '自动化 / 注册机',
     },
     title: {
-      dashboard: '系统概览', accounts: '账号池', playground: '调试对话', apiKeys: 'API 管理', logs: '服务日志', docs: '文档', register: '自动注册机',
+      dashboard: '系统概览', accounts: '账号池', models: '模型页', playground: '调试对话', apiKeys: 'API 管理', logs: '服务日志', docs: '文档', register: '自动注册机',
     },
     common: { docs: '文档', support: '支持', healthy: '正常', offline: '未就绪', signOut: '退出', refresh: '刷新', add: '添加', delete: '删除', copy: '复制' },
     dashboard: {
       serviceStatus: '服务状态', allGatewaysActive: '网关可用', noActiveSession: '没有可用账号', accountPool: '账号池', activeSessions: '可参与路由的 Qoder 账号', apiAuth: 'API 鉴权', openAccess: '未开启鉴权', activeUser: '当前账号', systemBriefing: '运行状态', readyBrief: '网关正在运行，当前有 {count} 个账号可用于请求路由。', notReadyBrief: '当前没有可用会话，请先导入账号或添加 PAT。', recentNotifications: '最近状态', authImportError: '本地登录导入失败', sessionActive: '账号已连接', credentialConfig: '凭据配置', credentialDesc: '添加 Qoder PAT，或导入本机已有的 Qoder 登录会话。', patPlaceholder: '输入 Qoder PAT...', addPat: '添加 PAT', saving: '保存中...', autoImport: '自动导入',
     },
     accounts: { desc: '管理网关用于请求路由和失败切换的 Qoder 账号。', refreshStatus: '刷新状态', importAccounts: '导入账号', search: '搜索账号...', empty: '还没有导入账号。点击导入账号，或在控制台添加 PAT。', showing: '共 {count} 个账号' },
+    models: { desc: '查看当前区域模型目录、近期访问情况和真实响应耗时。', refresh: '刷新目录', catalog: '目录来源', upstream: '上游目录', gatewayCatalog: '网关目录', recent24h: '最近 24 小时', requests: '请求数', activeAccount: '当前账号', availableModels: '可用模型', recentTraffic: '近期访问', benchmark: '测试选中模型', benchmarkAll: '测试常用模型', benchmarking: '测试中...', selectAll: '全选', selected: '已选', model: '模型', source: '来源', successRate: '成功率', ttft: '首字节', totalTime: '总耗时', lastUsed: '最近使用', noMetrics: '暂无访问', noRecent: '暂无近期请求', benchmarkResults: '测速结果', benchmarkHint: '测速会使用当前账号发起一个很短的真实请求，会消耗少量额度。', testPrompt: '测试提示词', defaultPrompt: '只回复：OK', passed: '成功', failed: '失败', noAccount: '请先添加并激活一个账号，再开始测速。' },
     playground: { modelConfig: '模型配置', streamResponse: '流式响应', systemPrompt: '系统提示词', systemPromptPlaceholder: '定义模型的角色或行为...', ask: '输入要发送的内容...', send: '发送', waiting: '正在等待响应...' },
     api: { generate: '生成新 Key', desc: '管理客户端请求网关时使用的 API Key 和访问权限。', gatewayAuth: '网关 API 鉴权', gatewayAuthDesc: '控制 /v1 请求是否必须携带 API Key。', systemStatus: '系统状态', activeKeys: '可用 Key', configured: '已配置', activeAccessKeys: '已启用的 API Key', keyPlaceholder: '输入或粘贴 API Key...', noKeys: '还没有配置 API Key。请先生成并添加。', bestPractices: '安全建议', bestPracticesDesc: '不要把 API Key 写在前端代码里。如果 Key 出现在日志、截图或共享脚本中，请及时删除并重新生成。', securityPolicy: '安全策略' },
     logs: { account: '账号', status: '级别', range: '时间范围', allAccounts: '全部账号', allStatuses: '全部级别', last24h: '最近 24 小时', lastHour: '最近 1 小时', last7d: '最近 7 天', noLogs: '暂无日志', noMatch: '没有匹配当前筛选条件的日志', timestamp: '时间', level: '级别', message: '内容' },
@@ -246,6 +296,210 @@ function CustomTextarea({ value, onChange, placeholder, className = '', rows }: 
       rows={rows}
       className={`custom-textarea w-full bg-white border border-hairline-strong text-ink text-sm px-4 py-3 rounded-xl outline-none focus:border-ink focus:ring-2 focus:ring-ink/10 transition-all placeholder:text-body/40 resize-none ${className}`}
     />
+  )
+}
+
+function ModelsPage({
+  lang,
+  authedFetch,
+  pushToast,
+}: {
+  lang: Lang
+  authedFetch: (url: string, options?: RequestInit) => Promise<Response>
+  pushToast: (type: ToastType, title: string, message: string) => void
+}) {
+  const t = UI_TEXT[lang]
+  const [payload, setPayload] = useState<ModelsPayload | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const [benchmarking, setBenchmarking] = useState(false)
+  const [selectedModels, setSelectedModels] = useState<string[]>([])
+  const [benchmarkResults, setBenchmarkResults] = useState<BenchmarkResult[]>([])
+  const [testPrompt, setTestPrompt] = useState('')
+
+  const fetchModels = useCallback(async () => {
+    setRefreshing(true)
+    try {
+      const response = await authedFetch('/ui/models')
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.detail || 'Model catalog request failed')
+      setPayload(data)
+      setSelectedModels(previous => {
+        const available = new Set((data.models || []).map((model: ModelInfo) => model.id))
+        const kept = previous.filter(id => available.has(id))
+        if (kept.length > 0) return kept
+        const recent = [...(data.models || [])]
+          .sort((left: ModelInfo, right: ModelInfo) => (right.metrics?.requests || 0) - (left.metrics?.requests || 0))
+          .filter((model: ModelInfo) => (model.metrics?.requests || 0) > 0)
+          .slice(0, 4)
+          .map((model: ModelInfo) => model.id)
+        return recent.length > 0 ? recent : (data.models || []).slice(0, 3).map((model: ModelInfo) => model.id)
+      })
+    } catch (error: any) {
+      pushToast('ERROR', lang === 'zh' ? '模型目录加载失败' : 'Model catalog failed', error.message || '')
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }, [authedFetch, lang, pushToast])
+
+  useEffect(() => { fetchModels() }, [fetchModels])
+
+  const formatMs = (value: number | null | undefined) => {
+    if (value === null || value === undefined) return '--'
+    return value >= 1000 ? `${(value / 1000).toFixed(1)} s` : `${Math.round(value)} ms`
+  }
+  const formatRate = (value: number | null | undefined) => value === null || value === undefined ? '--' : `${Math.round(value * 100)}%`
+  const formatTime = (value: number | null | undefined) => value ? new Date(value * 1000).toLocaleTimeString() : '--'
+  const sourceLabel = payload?.source === 'upstream' ? t.models.upstream : t.models.gatewayCatalog
+  const models = payload?.models || []
+  const sortedModels = [...models].sort((left, right) => (right.metrics?.requests || 0) - (left.metrics?.requests || 0))
+  const recent = payload?.metrics.recent || []
+
+  const toggleModel = (id: string) => {
+    setSelectedModels(previous => previous.includes(id) ? previous.filter(item => item !== id) : [...previous, id])
+  }
+  const selectAllModels = () => {
+    setSelectedModels(previous => previous.length === models.length ? [] : models.map(model => model.id))
+  }
+
+  const runBenchmark = async (requestedModels?: string[]) => {
+    const ids = requestedModels?.length ? requestedModels : selectedModels
+    if (ids.length === 0) {
+      pushToast('INFO', lang === 'zh' ? '请选择模型' : 'Select models', lang === 'zh' ? '至少选择一个模型后再测速' : 'Choose at least one model before benchmarking')
+      return
+    }
+    if (!payload?.active_uid) {
+      pushToast('ERROR', lang === 'zh' ? '没有可用账号' : 'No active account', t.models.noAccount)
+      return
+    }
+    setBenchmarking(true)
+    try {
+      const response = await authedFetch('/ui/models/benchmark', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ models: ids, prompt: testPrompt.trim() || undefined }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.detail || 'Benchmark failed')
+      setBenchmarkResults(data.results || [])
+      await fetchModels()
+      const passed = (data.results || []).filter((result: BenchmarkResult) => result.ok).length
+      pushToast('SUCCESS', lang === 'zh' ? '测速完成' : 'Benchmark complete', `${passed}/${(data.results || []).length} ${lang === 'zh' ? '个模型返回成功' : 'models responded'}`)
+    } catch (error: any) {
+      pushToast('ERROR', lang === 'zh' ? '测速失败' : 'Benchmark failed', error.message || '')
+    } finally {
+      setBenchmarking(false)
+    }
+  }
+
+  return (
+    <div className="space-y-8">
+      <section className="flex flex-col lg:flex-row lg:items-end justify-between gap-5">
+        <div className="max-w-2xl">
+          <p className="text-body text-[16px]">{t.models.desc}</p>
+          <div className="flex flex-wrap items-center gap-2 mt-3 text-[11px] font-bold uppercase tracking-wider text-body">
+            <span className="px-2.5 py-1 rounded-full bg-sky/20 text-ink">{payload?.region?.toUpperCase() || '--'}</span>
+            <span>{t.models.catalog}: {sourceLabel}</span>
+            {payload?.active_name && <span className="text-body/60">· {t.models.activeAccount}: {payload.active_name}</span>}
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <button onClick={() => runBenchmark()} disabled={benchmarking || loading} className="h-11 px-5 bg-ink text-white rounded-xl flex items-center gap-2 hover:bg-neutral-800 transition-all font-bold text-sm disabled:opacity-50">
+            <span className="material-symbols-outlined text-[18px]">speed</span>{benchmarking ? t.models.benchmarking : t.models.benchmark}
+          </button>
+          <button onClick={fetchModels} disabled={refreshing} title={t.models.refresh} aria-label={t.models.refresh} className="h-11 w-11 border border-hairline rounded-xl text-body hover:text-ink hover:bg-white transition-colors disabled:opacity-50">
+            <span className={`material-symbols-outlined text-[20px] ${refreshing ? 'animate-spin' : ''}`}>refresh</span>
+          </button>
+        </div>
+      </section>
+
+      <section className="grid grid-cols-1 md:grid-cols-3 gap-5">
+        {[
+          { label: t.models.availableModels, value: loading ? '...' : String(models.length), detail: t.models.catalog },
+          { label: t.models.recent24h, value: loading ? '...' : String(payload?.metrics.total_requests || 0), detail: t.models.requests },
+          { label: t.models.activeAccount, value: payload?.active_name || '--', detail: payload?.active_uid ? payload.active_uid.slice(0, 12) + '...' : t.models.noAccount },
+        ].map((stat, index) => (
+          <div key={index} className="bg-surface-card border border-hairline p-6 rounded-xl">
+            <div className="text-[11px] font-semibold text-body mb-2 uppercase tracking-widest">{stat.label}</div>
+            <div className="font-display-sm text-ink truncate" title={stat.value}>{stat.value}</div>
+            <div className="text-[12px] text-body mt-2">{stat.detail}</div>
+          </div>
+        ))}
+      </section>
+
+      <section className="glass-card rounded-2xl overflow-hidden shadow-sm">
+        <div className="p-6 border-b border-hairline flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <h3 className="font-bold text-ink text-lg">{t.models.availableModels}</h3>
+            <p className="text-xs text-body mt-1">{selectedModels.length} {t.models.selected}</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <button onClick={selectAllModels} className="px-3 py-2 border border-hairline rounded-lg text-xs font-bold text-body hover:text-ink hover:bg-white transition-colors">{t.models.selectAll}</button>
+            <button onClick={() => runBenchmark(sortedModels.slice(0, 6).map(model => model.id))} disabled={benchmarking || loading} className="px-3 py-2 border border-hairline rounded-lg text-xs font-bold text-body hover:text-ink hover:bg-white transition-colors disabled:opacity-50">{t.models.benchmarkAll}</button>
+          </div>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left min-w-[860px]">
+            <thead className="bg-canvas-soft border-b border-hairline">
+              <tr>{['', t.models.model, t.models.source, t.models.requests, t.models.successRate, t.models.ttft, t.models.totalTime, t.models.lastUsed].map((heading, index) => <th key={index} className="px-6 py-4 text-[10px] font-semibold text-body uppercase tracking-widest">{heading}</th>)}</tr>
+            </thead>
+            <tbody className="divide-y divide-hairline">
+              {loading ? (
+                <tr><td colSpan={8} className="py-12 text-center text-sm text-body">{lang === 'zh' ? '正在读取模型目录...' : 'Loading model catalog...'}</td></tr>
+              ) : sortedModels.length === 0 ? (
+                <tr><td colSpan={8} className="py-12 text-center text-sm text-body">{t.models.noMetrics}</td></tr>
+              ) : sortedModels.map(modelInfo => {
+                const metric = modelInfo.metrics || {}
+                return (
+                  <tr key={modelInfo.id} className="hover:bg-canvas-soft/60 transition-colors">
+                    <td className="px-6 py-4 w-12"><input type="checkbox" checked={selectedModels.includes(modelInfo.id)} onChange={() => toggleModel(modelInfo.id)} className="h-4 w-4 accent-stone-900" aria-label={`${t.models.selectAll} ${modelInfo.id}`} /></td>
+                    <td className="px-6 py-4"><div className="font-bold text-ink">{modelInfo.label}</div><div className="text-[11px] text-body font-mono mt-1">{modelInfo.id}</div></td>
+                    <td className="px-6 py-4"><span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${modelInfo.source === 'upstream' ? 'bg-mint/30 text-ink' : 'bg-sky/20 text-ink'}`}>{modelInfo.source === 'upstream' ? t.models.upstream : t.models.gatewayCatalog}</span></td>
+                    <td className="px-6 py-4 text-sm font-mono text-body">{metric.requests || 0}</td>
+                    <td className="px-6 py-4 text-sm font-mono text-body">{formatRate(metric.success_rate)}</td>
+                    <td className="px-6 py-4 text-sm font-mono text-body">{formatMs(metric.avg_ttft_ms)}</td>
+                    <td className="px-6 py-4 text-sm font-mono text-body">{formatMs(metric.avg_total_ms)}</td>
+                    <td className="px-6 py-4 text-xs font-mono text-body">{formatTime(metric.last_used_at)}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <div className="bg-surface-card border border-hairline rounded-2xl overflow-hidden">
+          <div className="p-6 border-b border-hairline"><h3 className="font-bold text-ink">{t.models.benchmarkResults}</h3><p className="text-xs text-body mt-1">{t.models.benchmarkHint}</p></div>
+          <div className="px-6 py-4 border-b border-hairline bg-canvas-soft/30 flex items-center gap-3">
+            <span className="material-symbols-outlined text-[18px] text-body">edit_note</span>
+            <CustomInput value={testPrompt} onChange={setTestPrompt} placeholder={t.models.defaultPrompt} className="!py-2.5 !bg-white" />
+          </div>
+          <div className="divide-y divide-hairline">
+            {benchmarkResults.length === 0 ? <div className="px-6 py-10 text-center text-xs text-body">{t.models.noMetrics}</div> : benchmarkResults.map(result => (
+              <div key={result.model} className="px-6 py-4 flex items-center gap-4">
+                <span className={`material-symbols-outlined ${result.ok ? 'text-emerald-600' : 'text-red-500'}`}>{result.ok ? 'check_circle' : 'error'}</span>
+                <div className="min-w-0 flex-1"><div className="font-bold text-sm text-ink truncate">{result.model}</div><div className="text-[11px] text-body truncate">{result.ok ? `${t.models.passed} · ${formatMs(result.ttft_ms)} / ${formatMs(result.total_ms)}` : result.error}</div></div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="bg-surface-card border border-hairline rounded-2xl overflow-hidden">
+          <div className="p-6 border-b border-hairline flex items-center justify-between"><h3 className="font-bold text-ink">{t.models.recentTraffic}</h3><span className="text-[10px] font-bold text-body uppercase tracking-widest">24h</span></div>
+          <div className="divide-y divide-hairline max-h-[360px] overflow-y-auto">
+            {recent.length === 0 ? <div className="px-6 py-10 text-center text-xs text-body">{t.models.noRecent}</div> : recent.slice(0, 12).map((item, index) => (
+              <div key={`${item.created_at}-${index}`} className="px-6 py-4 flex items-center gap-4">
+                <span className={`material-symbols-outlined text-[18px] ${item.success ? 'text-emerald-600' : 'text-red-500'}`}>{item.success ? 'check_circle' : 'error'}</span>
+                <div className="min-w-0 flex-1"><div className="font-bold text-sm text-ink truncate">{item.model}</div><div className="text-[11px] text-body">{formatTime(item.created_at)} · {item.source === 'benchmark' ? t.models.benchmarkResults : t.models.requests}</div></div>
+                <div className="text-right text-[11px] font-mono text-body"><div>{formatMs(item.ttft_ms)}</div><div>{formatMs(item.total_ms)}</div></div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+    </div>
   )
 }
 
@@ -386,6 +640,7 @@ export default function App() {
   const navLabels: Record<AppTabId, string> = {
     dashboard: t.nav.dashboard,
     accounts: t.nav.accounts,
+    models: t.nav.models,
     playground: t.nav.playground,
     'api-keys': t.nav.apiKeys,
     logs: t.nav.logs,
@@ -394,6 +649,7 @@ export default function App() {
   const pageMeta: Record<AppTabId, { bc: string; title: string }> = {
     dashboard: { bc: t.breadcrumb.dashboard, title: t.title.dashboard },
     accounts: { bc: t.breadcrumb.accounts, title: t.title.accounts },
+    models: { bc: t.breadcrumb.models, title: t.title.models },
     playground: { bc: t.breadcrumb.playground, title: t.title.playground },
     'api-keys': { bc: t.breadcrumb.apiKeys, title: t.title.apiKeys },
     logs: { bc: t.breadcrumb.logs, title: t.title.logs },
@@ -1094,6 +1350,11 @@ export default function App() {
                 </div>
               </section>
             </div>
+          )}
+
+          {/* ─── MODELS ─── */}
+          {activeTab === 'models' && (
+            <ModelsPage lang={lang} authedFetch={authedFetch} pushToast={pushToast} />
           )}
 
           {/* ─── AI PLAYGROUND ─── */}

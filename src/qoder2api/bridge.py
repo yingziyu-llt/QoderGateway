@@ -11,12 +11,31 @@ import httpx
 from . import encoding
 from .auth import SessionContext, bearer_headers
 from .env import httpx_client_kwargs
+from .regions import get_region
 
 
 QODER_CHAT_URL = "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
 # 新版协议（Qoder CLI 现行）：OpenAI 兼容端点，纯 Bearer，无 COSY 签名，响应为标准 OpenAI SSE。
 # 性能远优于老版（老版默认带长 reasoning，复杂任务可到分钟级）。
 QODER_CHAT_URL_NEW = "https://api2-v2.qoder.sh/model/v1/chat/completions"
+
+_CN_MODEL_KEYS = {
+    "auto": "auto",
+    "lite": "auto",
+    "qwen3.7-max": "qmodel_latest",
+    "qwen3.7plus": "qmodel",
+    "qwen3.7-plus": "qmodel",
+    "qwen3.6-flash": "q36fmodel",
+    "deepseek-v4-pro": "dmodel",
+    "deepseek-v4-flash": "dfmodel",
+    "glm-5.2": "gm51model",
+    "kimi-k2.7-code": "kmodel",
+    "minimax-m2.7": "mmodel",
+}
+
+
+def cn_model_key(model: str) -> str:
+    return _CN_MODEL_KEYS.get(model.strip().lower(), model)
 
 
 def now_ms() -> int:
@@ -238,11 +257,95 @@ def build_qoder_messages(template_messages: list[dict[str, Any]], incoming: list
     return rebuilt
 
 
+def build_cn_qoder_body(req: dict[str, Any], model: str) -> dict[str, Any]:
+    """Build the encoded legacy body used by the CN gateway."""
+    messages = copy.deepcopy(req.get("messages") if isinstance(req.get("messages"), list) else [])
+    tools = copy.deepcopy(req.get("tools") if isinstance(req.get("tools"), list) else [])
+    last_user_text = ""
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, str):
+                last_user_text = content
+            elif isinstance(content, list):
+                last_user_text = "\n".join(
+                    str(part.get("text") or "") for part in content if isinstance(part, dict)
+                )
+            break
+
+    model_key = cn_model_key(model)
+    max_tokens = req.get("max_tokens") or 32768
+    parameters: dict[str, Any] = {"max_tokens": max_tokens, "enable_thinking": False}
+    for key in ("temperature", "top_p", "presence_penalty", "frequency_penalty", "reasoning_effort"):
+        if key in req and req[key] is not None:
+            parameters[key] = req[key]
+    if req.get("reasoning_effort") not in (None, "", "off"):
+        parameters["enable_thinking"] = True
+
+    return {
+        "request_id": str(uuid.uuid4()),
+        "request_set_id": str(uuid.uuid4()),
+        "chat_record_id": str(uuid.uuid4()),
+        "session_id": str(uuid.uuid4()),
+        "stream": True,
+        "chat_task": "FREE_INPUT",
+        "is_reply": True,
+        "is_retry": False,
+        "source": 1,
+        "version": "3",
+        "session_type": "qodercli",
+        "agent_id": "agent_common",
+        "task_id": "common",
+        "code_language": "",
+        "chat_prompt": "",
+        "system": "",
+        "image_urls": None,
+        "aliyun_user_type": "",
+        "messages": messages,
+        "tools": tools,
+        "parameters": parameters,
+        "chat_context": {
+            "chatPrompt": "",
+            "imageUrls": None,
+            "extra": {
+                "context": [],
+                "modelConfig": {"key": model_key, "is_reasoning": bool(parameters.get("enable_thinking"))},
+                "originalContent": last_user_text,
+            },
+            "features": [],
+            "text": last_user_text,
+        },
+        "model_config": {
+            "key": model_key,
+            "display_name": model,
+            "model": "",
+            "format": "openai",
+            "is_vl": False,
+            "is_reasoning": bool(parameters.get("enable_thinking")),
+            "api_key": "",
+            "url": "",
+            "source": "system",
+            "max_input_tokens": 180000,
+        },
+        "business": {
+            "product": "cli",
+            "version": "1.0.0",
+            "type": "agent",
+            "stage": "start",
+            "id": str(uuid.uuid4()),
+            "name": last_user_text[:30],
+            "begin_at": now_ms(),
+        },
+    }
+
+
 def build_qoder_body(req: dict[str, Any], sess: SessionContext) -> tuple[dict[str, Any], str, bool]:
-    """新版协议 body：OpenAI 原生格式，直接透传 messages/tools。"""
+    """Build the regional upstream body while preserving the OpenAI input shape."""
     model = req.get("model") or "lite"
     messages = req.get("messages") if isinstance(req.get("messages"), list) else []
     tools_enabled = bool(req.get("tools"))
+    if sess.region == "cn":
+        return build_cn_qoder_body(req, model), model, tools_enabled
     rid = str(uuid.uuid4())
     body: dict[str, Any] = {
         "model": model,
@@ -291,10 +394,12 @@ def extract_delta(data_line: str) -> BridgeDelta:
                     return BridgeDelta(role, content, tool_calls)
             return BridgeDelta()
         # 老版：wrapper 内嵌 body 字符串
-        inner = obj.get("body") or ""
+        inner = obj.get("body")
         if not inner:
             return BridgeDelta()
-        inner_json = json.loads(inner)
+        inner_json = json.loads(inner) if isinstance(inner, str) else inner
+        if not isinstance(inner_json, dict):
+            return BridgeDelta()
         for choice in inner_json.get("choices", []):
             delta = choice.get("delta", {})
             role = delta.get("role") or ""
@@ -336,7 +441,32 @@ class ToolCallAccumulator:
 
 
 async def qoder_stream_lines(sess: SessionContext, body: dict[str, Any], model: str) -> AsyncIterator[str]:
-    """新版协议：POST api2-v2.qoder.sh/model/v1/chat/completions，Bearer 直连。"""
+    if sess.region == "cn":
+        # The CN gateway uses the same encoded COSY/SSE protocol as Qoder's
+        # current client. The response parser below accepts its envelope.
+        encoded_body = encoding.encode(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode())
+        chat_url = get_region("cn").chat_url
+        headers = bearer_headers(
+            sess,
+            chat_url,
+            encoded_body,
+            "text/event-stream",
+            {
+                "x-model-key": cn_model_key(model),
+                "x-model-source": "system",
+            },
+        )
+        async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=15), **httpx_client_kwargs()) as client:
+            async with client.stream("POST", chat_url, content=encoded_body.encode("ascii"), headers=headers) as response:
+                if response.status_code != 200:
+                    text = await response.aread()
+                    raise RuntimeError(f"HTTP {response.status_code} {text.decode(errors='replace')}")
+                async for line in response.aiter_lines():
+                    if line:
+                        yield line
+        return
+
+    """新版国际协议：Bearer 直连 OpenAI-compatible chat。"""
     ctx = (body.get("metadata") or {}).get("context") or {}
     headers = {
         "Authorization": f"Bearer {sess.identity.security_oauth_token}",
@@ -347,7 +477,7 @@ async def qoder_stream_lines(sess: SessionContext, body: dict[str, Any], model: 
         "X-Session-ID": ctx.get("session_id", ""),
     }
     async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=15), **httpx_client_kwargs()) as client:
-        async with client.stream("POST", QODER_CHAT_URL_NEW, json=body, headers=headers) as response:
+        async with client.stream("POST", get_region("global").modern_chat_url or QODER_CHAT_URL_NEW, json=body, headers=headers) as response:
             if response.status_code != 200:
                 text = await response.aread()
                 raise RuntimeError(f"HTTP {response.status_code} {text.decode(errors='replace')}")

@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from . import encoding
 from .env import httpx_client_kwargs
+from .regions import configured_region, get_region, normalize_region
 from .signature import APPCODE, current_date, sign
 
 
@@ -37,6 +38,7 @@ class AuthIdentity:
     user_type: str
     security_oauth_token: str
     refresh_token: str
+    email: str = ""
 
 
 @dataclass(frozen=True)
@@ -48,10 +50,16 @@ class SessionContext:
     machine_id: str
     machine_token: str
     machine_type: str
+    region: str = "global"
 
 
-def new_machine() -> tuple[str, str, str]:
+def new_machine(region: str | None = None) -> tuple[str, str, str]:
+    region_name = normalize_region(region)
     machine_id = str(uuid.uuid4())
+    if region_name == "cn":
+        # The current CN Qoder client uses the machine id as its machine token
+        # and the fixed COSY machine type value.
+        return machine_id, machine_id, "5"
     seed = (str(uuid.uuid4()) + str(uuid.uuid4()))[:50].encode()
     machine_token = base64.urlsafe_b64encode(seed).decode().rstrip("=")
     machine_type = uuid.uuid4().hex[:18]
@@ -88,16 +96,26 @@ def auth_payload(identity: AuthIdentity) -> bytes:
     ).encode()
 
 
-def new_session(identity: AuthIdentity, machine_id: str, machine_token: str, machine_type: str) -> SessionContext:
+def new_session(
+    identity: AuthIdentity,
+    machine_id: str,
+    machine_token: str,
+    machine_type: str,
+    region: str = "global",
+) -> SessionContext:
+    region_name = normalize_region(region)
+    if region_name == "cn":
+        machine_token = machine_id
+        machine_type = "5"
     temp_key = uuid.uuid4().hex[:16].encode("ascii")
     cosy_key = base64.b64encode(rsa_encrypt(temp_key)).decode()
     info = base64.b64encode(aes_cbc_pkcs7_encrypt(auth_payload(identity), temp_key)).decode()
-    return SessionContext(temp_key, cosy_key, info, identity, machine_id, machine_token, machine_type)
+    return SessionContext(temp_key, cosy_key, info, identity, machine_id, machine_token, machine_type, region_name)
 
 
-def build_payload_b64(info: str) -> str:
+def build_payload_b64(info: str, region: str = "global") -> str:
     payload = {
-        "cosyVersion": "0.1.43",
+        "cosyVersion": get_region(region).cosy_version,
         "ideVersion": "",
         "info": info,
         "requestId": str(uuid.uuid4()),
@@ -113,13 +131,15 @@ def sign_request(payload_b64: str, cosy_key: str, cosy_date: str, body: str, pat
 
 
 def bearer_headers(sess: SessionContext, full_url: str, body: str, accept: str, extra_headers: dict[str, str] | None = None) -> dict[str, str]:
+    region = get_region(sess.region)
     path = urlparse(full_url).path
     path_sig = path[len("/algo") :] if path.startswith("/algo") else path
-    payload_b64 = build_payload_b64(sess.info)
+    payload_b64 = build_payload_b64(sess.info, sess.region)
     date = str(int(time.time()))
     sig = sign_request(payload_b64, sess.cosy_key, date, body, path_sig)
+    body_bytes = body.encode()
     headers = {
-        "cosy-data-policy": "AGREE",
+        "cosy-data-policy": region.data_policy,
         "content-type": "application/json",
         "cosy-machinetype": sess.machine_type,
         "cosy-clienttype": "5",
@@ -127,13 +147,20 @@ def bearer_headers(sess: SessionContext, full_url: str, body: str, accept: str, 
         "cosy-user": sess.identity.uid,
         "cosy-key": sess.cosy_key,
         "accept": accept,
-        "cosy-clientip": "169.254.198.161",
+        "cosy-clientip": "127.0.0.1" if sess.region == "cn" else "169.254.198.161",
         "authorization": f"Bearer COSY.{payload_b64}.{sig}",
         "accept-encoding": "identity",
-        "cosy-version": "0.1.43",
+        "cosy-version": region.cosy_version,
         "cosy-machineid": sess.machine_id,
         "cosy-machinetoken": sess.machine_token,
+        "cosy-bodyhash": hashlib.md5(body_bytes).hexdigest(),
+        "cosy-bodylength": str(len(body_bytes)),
+        "cosy-sigpath": path_sig,
+        "cosy-machineos": "x86_64_linux",
+        "cosy-organization-id": "",
+        "cosy-organization-tags": "",
         "login-version": "v2",
+        "x-request-id": str(uuid.uuid4()),
         "user-agent": "Go-http-client/2.0",
     }
     if accept == "text/event-stream":
@@ -143,7 +170,72 @@ def bearer_headers(sess: SessionContext, full_url: str, body: str, accept: str, 
     return headers
 
 
-async def exchange_job_token(personal_token: str, machine_id: str, machine_token: str, machine_type: str) -> dict[str, Any]:
+async def _exchange_job_token_modern(personal_token: str, region: str) -> dict[str, Any]:
+    config = get_region(region)
+    headers = {
+        "content-type": "application/json",
+        "accept": "application/json",
+        "user-agent": "qoder2api-python",
+        "cosy-version": "1.0.1",
+        "cosy-clienttype": "5",
+    }
+    async with httpx.AsyncClient(timeout=15, **httpx_client_kwargs()) as client:
+        response = await client.post(
+            f"{config.openapi_url}/api/v1/jobToken/exchange",
+            json={"personal_token": personal_token},
+            headers=headers,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"jobToken HTTP {response.status_code} body={response.text}")
+        data = response.json()
+        access_token = str(data.get("token") or "").strip()
+        if not access_token:
+            raise RuntimeError("jobToken response did not contain a token")
+
+        # The exchange response normally includes user_id, but userinfo is the
+        # authoritative source for the display name and account id.
+        profile: dict[str, Any] = {}
+        try:
+            profile_response = await client.get(
+                f"{config.openapi_url}/api/v1/userinfo",
+                headers={
+                    "authorization": f"Bearer {access_token}",
+                    "accept": "application/json",
+                    "user-agent": "qoder2api-python",
+                    "cosy-version": "1.0.1",
+                    "cosy-clienttype": "5",
+                },
+            )
+            if profile_response.status_code == 200:
+                profile = profile_response.json()
+        except httpx.HTTPError:
+            pass
+
+    user_id = str(profile.get("id") or data.get("user_id") or data.get("id") or "").strip()
+    if not user_id:
+        raise RuntimeError("userinfo response did not contain a user id")
+    return {
+        "name": profile.get("name") or profile.get("username") or data.get("name") or "",
+        "id": user_id,
+        "userType": data.get("user_type") or data.get("userType") or "personal_standard",
+        "securityOauthToken": access_token,
+        "refreshToken": str(data.get("refresh_token") or "").strip(),
+        "email": profile.get("email") or "",
+        "expiresAt": data.get("expires_at") or "",
+    }
+
+
+async def exchange_job_token(
+    personal_token: str,
+    machine_id: str,
+    machine_token: str,
+    machine_type: str,
+    region: str | None = None,
+) -> dict[str, Any]:
+    region_name = normalize_region(region)
+    if region_name == "cn":
+        return await _exchange_job_token_modern(personal_token, region_name)
+
     inner = {
         "personalToken": personal_token,
         "securityOauthToken": "",
@@ -176,9 +268,18 @@ async def exchange_job_token(personal_token: str, machine_id: str, machine_token
     return response.json()
 
 
-async def create_session(personal_token: str) -> SessionContext:
-    machine_id, machine_token, machine_type = new_machine()
-    data = await exchange_job_token(personal_token, machine_id, machine_token, machine_type)
+async def create_session(personal_token: str, region: str | None = None) -> SessionContext:
+    region_name = normalize_region(region or configured_region())
+    personal_token = personal_token.strip()
+    if personal_token.startswith("pat|"):
+        personal_token = personal_token.split("|", 2)[1]
+    if personal_token.startswith(("dt-", "drt-", "jt-", "jrt-")):
+        raise ValueError(
+            "This is a Qoder session/job token, not a PAT. Use the pt- Personal Access Token, "
+            "or use Auto Import for the local Qoder session."
+        )
+    machine_id, machine_token, machine_type = new_machine(region_name)
+    data = await exchange_job_token(personal_token, machine_id, machine_token, machine_type, region_name)
     identity = AuthIdentity(
         name=data.get("name", ""),
         aid=data.get("id", ""),
@@ -189,18 +290,22 @@ async def create_session(personal_token: str) -> SessionContext:
         user_type=data.get("userType", "personal_standard"),
         security_oauth_token=data.get("securityOauthToken", ""),
         refresh_token=data.get("refreshToken", ""),
+        email=data.get("email", ""),
     )
-    return new_session(identity, machine_id, machine_token, machine_type)
+    return new_session(identity, machine_id, machine_token, machine_type, region_name)
 
 
-def load_local_session() -> SessionContext:
+def load_local_session(region: str | None = None) -> SessionContext:
+    region_name = normalize_region(region or "global")
     auth_dir = Path.home() / ".qoder" / ".auth"
     id_path = auth_dir / "id"
     if not id_path.exists():
         id_path = auth_dir / "machine_id"
     user_path = auth_dir / "user"
     if not id_path.exists() or not user_path.exists():
-        raise FileNotFoundError("Local Qoder auth files (id/machine_id and user) not found.")
+        raise FileNotFoundError(
+            "Local Qoder auth files not found. Expected ~/.qoder/.auth/{id|machine_id,user}."
+        )
     
     machine_id = id_path.read_text(encoding="utf-8").strip()
     cipher_bytes = base64.b64decode(user_path.read_text(encoding="utf-8").strip())
@@ -228,11 +333,18 @@ def load_local_session() -> SessionContext:
         refresh_token=data.get("refreshToken") or data.get("refresh_token") or "",
     )
     
-    _, machine_token, machine_type = new_machine()
-    return new_session(identity, machine_id, machine_token, machine_type)
+    _, machine_token, machine_type = new_machine(region_name)
+    return new_session(identity, machine_id, machine_token, machine_type, region_name)
 
 
-async def fetch_user_status(user_id: str, machine_id: str, machine_token: str, machine_type: str) -> dict[str, Any]:
+async def fetch_user_status(
+    user_id: str,
+    machine_id: str,
+    machine_token: str,
+    machine_type: str,
+    region: str = "global",
+) -> dict[str, Any]:
+    region_config = get_region(region)
     inner = {
         "userId": user_id,
         "personalToken": "",
@@ -251,7 +363,7 @@ async def fetch_user_status(user_id: str, machine_id: str, machine_token: str, m
         "appcode": APPCODE,
         "accept": "application/json",
         "accept-encoding": "identity",
-        "cosy-version": "0.1.43",
+        "cosy-version": region_config.cosy_version,
         "cosy-clienttype": "5",
         "date": date,
         "signature": sign(date),
@@ -260,7 +372,11 @@ async def fetch_user_status(user_id: str, machine_id: str, machine_token: str, m
         "user-agent": "Go-http-client/2.0",
     }
     async with httpx.AsyncClient(timeout=15, **httpx_client_kwargs()) as client:
-        response = await client.post("https://center.qoder.sh/algo/api/v3/user/status?Encode=1", content=body, headers=headers)
+        response = await client.post(
+            f"{get_region(region).refresh_url.rsplit('/user/', 1)[0]}/user/status?Encode=1",
+            content=body,
+            headers=headers,
+        )
     if response.status_code != 200:
         raise RuntimeError(f"status HTTP {response.status_code} body={response.text}")
     return response.json()
