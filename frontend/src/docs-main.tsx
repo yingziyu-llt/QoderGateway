@@ -15,6 +15,7 @@ const docModules = import.meta.glob('./docs/*.md', { query: '?raw', import: 'def
 const DOC_META = [
   { id: 'quickstart', title: 'Quickstart', zhTitle: '快速开始', group: 'Getting Started', zhGroup: '入门', icon: 'rocket_launch' },
   { id: 'authentication', title: 'Authentication', zhTitle: '鉴权机制', group: 'Guides', zhGroup: '指南', icon: 'shield_lock' },
+  { id: 'new-api-provider', title: 'New API Provider', zhTitle: 'New API 供应商', group: 'Guides', zhGroup: '指南', icon: 'hub' },
   { id: 'api-reference', title: 'API Reference', zhTitle: 'API 参考', group: 'Reference', zhGroup: '参考', icon: 'api' },
   { id: 'account-pool', title: 'Account Pool', zhTitle: '账号池', group: 'Guides', zhGroup: '指南', icon: 'account_balance_wallet' },
   { id: 'operations', title: 'Operations', zhTitle: '运维', group: 'Operations', zhGroup: '运维', icon: 'terminal' },

@@ -33,6 +33,7 @@ Special thanks to the [LINUX DO](https://linux.do) community for the platform of
 - **WebUI 控制台** — Dashboard、账号管理、API Key 管理、Playground、服务日志
 - **模型观测页** — 拉取当前区域模型目录，查看近 24 小时实际访问的成功率/首字节/总耗时，并对选中模型做短请求测速
 - **独立文档站** — `/documents` 提供中英文 Wiki，支持本地搜索和目录跳转
+- **New API 上游渠道** — 可作为标准 OpenAI 渠道接入 New API，由 New API 统一管理用户、模型权限、配额和审计
 - **自动检测语言** — 根据浏览器地区自动切换中文/英文
 
 ## 快速开始 / Quickstart
@@ -94,6 +95,9 @@ uv run qoder2api
 | `/documents` | 文档站 / Wiki |
 | `/v1/chat/completions` | OpenAI 兼容 API |
 | `/v1/models` | OpenAI 兼容模型列表 |
+| `/healthz` | 存活检查 |
+| `/readyz` | Provider 和 Qoder 账号就绪检查 |
+| `/ui/api-keys/usage` | 管理接口：按 API Key 和模型统计近期 token 用量 |
 
 控制台的 **模型页** 默认按当前区域显示模型目录。测速使用当前激活账号发送短请求，会消耗少量 Qoder 额度；测速事件会单独标记，不会混入生产流量健康统计。
 
@@ -123,6 +127,9 @@ curl http://127.0.0.1:5050/v1/chat/completions \
 | `QODER_ENABLE_DOCUMENTS` | 是否启用文档页 | `1` |
 | `QODER_ENABLE_LANDING` | 是否启用 Landing Page | `1` |
 | `QODER_PAT` | 首次启动时自动导入的 PAT | 空 |
+| `QODER_PROVIDER_MODE` | Provider 模式：`standalone` 或 `new_api` | `standalone` |
+| `QODER_PROVIDER_API_KEY` | New API 渠道使用的共享 API Key | 空 |
+| `QODER_PROVIDER_MODELS` | 暴露给 New API 的逗号分隔模型 ID | 空（使用区域目录） |
 
 ## 项目结构 / Project Structure
 

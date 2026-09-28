@@ -186,6 +186,63 @@ def normalize_tool_calls(raw_tool_calls: Any) -> list[dict[str, Any]] | None:
     return normalized or None
 
 
+def normalize_usage(raw: Any) -> dict[str, int] | None:
+    """Normalize the usage shapes returned by the modern and legacy gateways."""
+    if not isinstance(raw, dict):
+        return None
+    for nested_key in ("usage", "raw_usage", "rawUsage"):
+        nested = raw.get(nested_key)
+        if isinstance(nested, dict):
+            normalized = normalize_usage(nested)
+            if normalized:
+                return normalized
+
+    def number(*keys: str) -> int | None:
+        for key in keys:
+            value = raw.get(key)
+            if value is None:
+                continue
+            try:
+                parsed = int(float(value))
+            except (TypeError, ValueError):
+                continue
+            if parsed >= 0:
+                return parsed
+        return None
+
+    prompt = number("prompt_tokens", "input_tokens", "promptTokens", "inputTokens")
+    completion = number("completion_tokens", "output_tokens", "completionTokens", "outputTokens")
+    total = number("total_tokens", "totalTokens")
+    if prompt is None and completion is None and total is None:
+        return None
+    prompt = prompt or 0
+    completion = completion or 0
+    total = total if total is not None else prompt + completion
+    return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
+
+
+def estimate_tokens(text: str) -> int:
+    """Conservative tokenizer-free estimate used only when upstream omits usage."""
+    if not text:
+        return 0
+    return max(1, (len(text.encode("utf-8")) + 3) // 4)
+
+
+def estimate_usage(req: dict[str, Any], output_text: str) -> dict[str, int]:
+    prompt_payload = json.dumps(
+        {"messages": req.get("messages", []), "tools": req.get("tools", [])},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    prompt_tokens = estimate_tokens(prompt_payload)
+    completion_tokens = estimate_tokens(output_text)
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+
+
 def parse_tool_calls_text(text: str | None) -> list[dict[str, Any]] | None:
     if not text:
         return None
@@ -372,10 +429,11 @@ class BridgeDelta:
     role: str = ""
     content: str = ""
     tool_calls: list[dict[str, Any]] | None = None
+    usage: dict[str, int] | None = None
 
     @property
     def is_empty(self) -> bool:
-        return not self.role and not self.content and not self.tool_calls
+        return not self.role and not self.content and not self.tool_calls and not self.usage
 
 
 def extract_delta(data_line: str) -> BridgeDelta:
@@ -383,6 +441,7 @@ def extract_delta(data_line: str) -> BridgeDelta:
         obj = json.loads(data_line)
         if not isinstance(obj, dict):
             return BridgeDelta()
+        usage = normalize_usage(obj)
         # 新版：标准 OpenAI chunk（choices 直接在顶层）
         if "choices" in obj:
             for choice in obj.get("choices", []):
@@ -391,29 +450,36 @@ def extract_delta(data_line: str) -> BridgeDelta:
                 content = delta.get("content") or ""
                 tool_calls = delta.get("tool_calls") if isinstance(delta.get("tool_calls"), list) else None
                 if role or content or tool_calls:
-                    return BridgeDelta(role, content, tool_calls)
-            return BridgeDelta()
+                    return BridgeDelta(role, content, tool_calls, usage)
+            return BridgeDelta(usage=usage)
         # 老版：wrapper 内嵌 body 字符串
         inner = obj.get("body")
         if not inner:
-            return BridgeDelta()
+            return BridgeDelta(usage=usage)
         inner_json = json.loads(inner) if isinstance(inner, str) else inner
         if not isinstance(inner_json, dict):
-            return BridgeDelta()
-        for choice in inner_json.get("choices", []):
-            delta = choice.get("delta", {})
-            role = delta.get("role") or ""
-            content = delta.get("content") or ""
-            tool_calls = delta.get("tool_calls") if isinstance(delta.get("tool_calls"), list) else None
-            if role or content or tool_calls:
-                return BridgeDelta(role, content, tool_calls)
+            return BridgeDelta(usage=usage)
+        inner_delta = extract_delta(json.dumps(inner_json, ensure_ascii=False, separators=(",", ":")))
+        if inner_delta.usage is None:
+            inner_delta.usage = usage
+        return inner_delta
     except (TypeError, json.JSONDecodeError):
         return BridgeDelta()
     return BridgeDelta()
 
 
-def make_chunk(chunk_id: str, created: int, model: str, delta: dict[str, Any] | None = None, finish_reason: str | None = None) -> dict[str, Any]:
-    return {"id": chunk_id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": [{"index": 0, "delta": delta or {}, "finish_reason": finish_reason}]}
+def make_chunk(
+    chunk_id: str,
+    created: int,
+    model: str,
+    delta: dict[str, Any] | None = None,
+    finish_reason: str | None = None,
+    usage: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    payload = {"id": chunk_id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": [{"index": 0, "delta": delta or {}, "finish_reason": finish_reason}]}
+    if usage is not None:
+        payload["usage"] = usage
+    return payload
 
 
 class ToolCallAccumulator:
@@ -486,7 +552,7 @@ async def qoder_stream_lines(sess: SessionContext, body: dict[str, Any], model: 
                     yield line
 
 
-async def stream_openai_response(req: dict[str, Any], sess: SessionContext) -> AsyncIterator[str]:
+async def stream_openai_response(req: dict[str, Any], sess: SessionContext, usage_state: dict[str, Any] | None = None) -> AsyncIterator[str]:
     body, model, tools_enabled = build_qoder_body(req, sess)
     chunk_id = "chatcmpl-" + uuid.uuid4().hex[:24]
     created = int(time.time())
@@ -495,6 +561,8 @@ async def stream_openai_response(req: dict[str, Any], sess: SessionContext) -> A
     pending = ""
     streaming_text = False
     pending_role = "assistant"
+    upstream_usage: dict[str, int] | None = None
+    output_text: list[str] = []
 
     def event(payload: dict[str, Any]) -> str:
         return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
@@ -505,6 +573,8 @@ async def stream_openai_response(req: dict[str, Any], sess: SessionContext) -> A
         delta = extract_delta(line[5:].strip())
         if delta.is_empty:
             continue
+        if delta.usage:
+            upstream_usage = delta.usage
         if delta.role:
             pending_role = delta.role
         if delta.tool_calls:
@@ -524,6 +594,7 @@ async def stream_openai_response(req: dict[str, Any], sess: SessionContext) -> A
         if not delta.content:
             continue
         if not tools_enabled or streaming_text:
+            output_text.append(delta.content)
             out_delta = {"content": delta.content}
             if not emitted:
                 out_delta["role"] = pending_role
@@ -536,6 +607,7 @@ async def stream_openai_response(req: dict[str, Any], sess: SessionContext) -> A
         if "Tool calls:".startswith(candidate) or candidate.startswith("Tool calls:"):
             continue
         streaming_text = True
+        output_text.append(pending)
         out_delta = {"content": pending}
         if not emitted:
             out_delta["role"] = pending_role
@@ -553,10 +625,16 @@ async def stream_openai_response(req: dict[str, Any], sess: SessionContext) -> A
         tool_calls.append(indexed)
         yield event(make_chunk(chunk_id, created, model, {"tool_calls": indexed, "role": pending_role} if not emitted else {"tool_calls": indexed}))
     elif pending:
+        output_text.append(pending)
         yield event(make_chunk(chunk_id, created, model, {"content": pending, "role": pending_role} if not emitted else {"content": pending}))
 
     finish_reason = "tool_calls" if tool_calls.calls else "stop"
-    yield event(make_chunk(chunk_id, created, model, {}, finish_reason))
+    usage = upstream_usage or estimate_usage(req, "".join(output_text))
+    estimated = upstream_usage is None
+    if usage_state is not None:
+        usage_state.clear()
+        usage_state.update({"usage": usage, "estimated": estimated})
+    yield event(make_chunk(chunk_id, created, model, {}, finish_reason, usage))
     yield "data: [DONE]\n\n"
 
 
@@ -566,10 +644,13 @@ async def complete_openai_response(req: dict[str, Any], sess: SessionContext) ->
     created = int(time.time())
     full = []
     tool_calls = ToolCallAccumulator()
+    upstream_usage: dict[str, int] | None = None
     async for line in qoder_stream_lines(sess, body, model):
         if not line.startswith("data:"):
             continue
         delta = extract_delta(line[5:].strip())
+        if delta.usage:
+            upstream_usage = delta.usage
         if delta.content:
             full.append(delta.content)
         if delta.tool_calls:
@@ -586,11 +667,13 @@ async def complete_openai_response(req: dict[str, Any], sess: SessionContext) ->
         message["content"] = content
     if tool_calls.calls:
         message["tool_calls"] = tool_calls.snapshot()
+    usage = upstream_usage or estimate_usage(req, content)
     return {
         "id": completion_id,
         "object": "chat.completion",
         "created": created,
         "model": model,
         "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls" if tool_calls.calls or fallback_tool_calls else "stop"}],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "usage": usage,
+        "_qodergate_usage_estimated": upstream_usage is None,
     }

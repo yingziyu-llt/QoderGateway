@@ -16,6 +16,7 @@ X-Gateway-Token: admin
 - `/ui/accounts`
 - `/ui/config`
 - `/ui/logs`
+- `/ui/api-keys/usage`
 
 ## 外部 API Key
 
@@ -26,6 +27,12 @@ OpenAI 兼容接口可以单独开启 Bearer Key 校验。
 ```http
 Authorization: Bearer <allowed-api-key>
 ```
+
+控制台的 API Key 管理页会按最近 24 小时统计每个 Key 和模型的请求数、输入 token、输出 token 和总 token。统计接口是 `GET /ui/api-keys/usage?window_hours=24`，需要携带管理 Token；请求统计事件只保存 Key 的不可逆指纹，不保存原始 Key。原始 Key 仍保存在鉴权配置中，用于校验客户端请求。
+
+## New API Provider 模式
+
+将 `QODER_PROVIDER_MODE=new_api` 后，`/v1/models` 和 `/v1/chat/completions` 会强制要求 Bearer Key。优先使用环境变量 `QODER_PROVIDER_API_KEY`，未设置时兼容控制台中配置的 API Key。这个 Key 只填写到 New API 的渠道配置中，最终用户应使用 New API 签发的 Key。
 
 ## 两种密钥的区别
 

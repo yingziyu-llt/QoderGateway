@@ -1,7 +1,7 @@
 from typing import Any
 
 from .database import get_db
-from .env import admin_password
+from .env import admin_password, provider_api_key, provider_mode, provider_model_ids
 
 
 def load_config() -> dict[str, Any]:
@@ -18,7 +18,10 @@ def load_config() -> dict[str, Any]:
     return {
         "auth_required": auth_required,
         "allowed_keys": allowed_keys,
-        "gateway_token": gateway_token
+        "gateway_token": gateway_token,
+        "provider_mode": provider_mode(),
+        "provider_api_key": provider_api_key(),
+        "provider_models": provider_model_ids(),
     }
 
 

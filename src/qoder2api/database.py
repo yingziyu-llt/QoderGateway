@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -11,10 +12,18 @@ load_dotenv()
 DB_PATH = Path.home() / ".qoder" / "qoder2api.db"
 
 
+@contextmanager
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db():
@@ -92,6 +101,7 @@ def init_db():
                 """
                 CREATE TABLE IF NOT EXISTS request_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id TEXT,
                     created_at REAL NOT NULL,
                     model TEXT NOT NULL,
                     account_uid TEXT,
@@ -101,12 +111,33 @@ def init_db():
                     status_code INTEGER,
                     ttft_ms REAL,
                     total_ms REAL,
-                    error TEXT
+                    error TEXT,
+                    api_key_hash TEXT,
+                    prompt_tokens INTEGER,
+                    completion_tokens INTEGER,
+                    total_tokens INTEGER,
+                    tokens_estimated INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            for column, definition in (
+                ("request_id", "TEXT"),
+                ("api_key_hash", "TEXT"),
+                ("prompt_tokens", "INTEGER"),
+                ("completion_tokens", "INTEGER"),
+                ("total_tokens", "INTEGER"),
+                ("tokens_estimated", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                try:
+                    conn.execute(f"ALTER TABLE request_events ADD COLUMN {column} {definition}")
+                except Exception:
+                    pass
             conn.execute("CREATE INDEX IF NOT EXISTS idx_request_events_created_at ON request_events(created_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_request_events_model ON request_events(model, created_at DESC)")
+            try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_request_events_api_key ON request_events(api_key_hash, created_at DESC)")
+            except Exception:
+                pass
         except Exception:
             # A read-only legacy database must not prevent the gateway from
             # starting. telemetry.py falls back to an in-process buffer.

@@ -5,7 +5,8 @@ QoderGate 把 OpenAI 兼容客户端请求桥接到 Qoder 会话。
 ## 请求流程
 
 ```text
-Client
+用户/客户端
+  -> New API（用户、分组、配额、审计）
   -> FastAPI /v1/chat/completions
   -> API Key 校验
   -> SQLite 账号路由器

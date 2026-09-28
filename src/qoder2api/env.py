@@ -32,6 +32,26 @@ def admin_password() -> str | None:
     return value or None
 
 
+def provider_mode() -> str:
+    value = os.getenv("QODER_PROVIDER_MODE", "standalone").strip().lower()
+    return value if value in {"standalone", "new_api"} else "standalone"
+
+
+def provider_api_key() -> str | None:
+    value = os.getenv("QODER_PROVIDER_API_KEY", "").strip()
+    return value or None
+
+
+def provider_model_ids() -> list[str]:
+    value = os.getenv("QODER_PROVIDER_MODELS", "")
+    result: list[str] = []
+    for item in value.split(","):
+        model = item.strip()
+        if model and model not in result:
+            result.append(model[:160])
+    return result
+
+
 def proxy_url() -> str | None:
     value = os.getenv("QODER_PROXY", "").strip()
     return value or None

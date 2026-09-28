@@ -1,14 +1,17 @@
 import argparse
 import collections
 import os
+import re
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException, Header, Depends
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .auth import SessionContext, create_session, load_local_session
@@ -35,7 +38,7 @@ from .tokens import (
 )
 from .regions import configured_region, normalize_region
 from .models import benchmark_model, discover_models
-from .telemetry import get_model_metrics, record_request
+from .telemetry import api_key_fingerprint, get_api_key_usage, get_model_metrics, record_request
 
 BASE_DIR = os.path.dirname(__file__)
 INDEX_HTML = Path(BASE_DIR) / "static" / "index.html"
@@ -69,6 +72,125 @@ def _safe_record_request(**kwargs: Any) -> None:
 def _status_code(exc: Exception) -> int | None:
     response = getattr(exc, "response", None)
     return getattr(response, "status_code", None)
+
+
+def _incoming_api_key(authorization: str | None) -> str | None:
+    if authorization and authorization.strip().lower().startswith("bearer "):
+        value = authorization.split(" ", 1)[1].strip()
+        return value or None
+    return None
+
+
+def _openai_error(message: str, error_type: str, code: str | None = None) -> dict[str, Any]:
+    error: dict[str, Any] = {"message": message, "type": error_type}
+    if code:
+        error["code"] = code
+    return {"error": error}
+
+
+def _public_error_type(status_code: int) -> str:
+    return {
+        400: "invalid_request_error",
+        401: "authentication_error",
+        403: "permission_error",
+        404: "invalid_request_error",
+        408: "timeout_error",
+        429: "rate_limit_error",
+        500: "server_error",
+        502: "upstream_error",
+        503: "server_error",
+        504: "upstream_timeout",
+    }.get(status_code, "api_error")
+
+
+@app.exception_handler(RequestValidationError)
+async def public_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    if request.url.path.startswith("/v1/"):
+        return JSONResponse(
+            status_code=400,
+            content=_openai_error("Invalid request body", "invalid_request_error", "invalid_request"),
+        )
+    return JSONResponse(status_code=422, content={"detail": "Invalid request body"})
+
+
+@app.exception_handler(HTTPException)
+async def public_http_error(request: Request, exc: HTTPException) -> JSONResponse:
+    if request.url.path.startswith("/v1/"):
+        detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=_openai_error(detail, _public_error_type(exc.status_code)),
+            headers=exc.headers,
+        )
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers)
+
+
+@app.exception_handler(Exception)
+async def public_unhandled_error(request: Request, exc: Exception) -> JSONResponse:
+    if request.url.path.startswith("/v1/"):
+        add_log(f"Unhandled provider error: {_safe_upstream_detail(exc)}", "ERROR")
+        return JSONResponse(
+            status_code=502,
+            content=_openai_error("Qoder upstream request failed", "upstream_error"),
+        )
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
+
+def _require_public_api_key(authorization: str | None, config: dict[str, Any]) -> str | None:
+    incoming_key = _incoming_api_key(authorization)
+    strict = bool(config.get("auth_required")) or config.get("provider_mode") == "new_api"
+    if not strict:
+        return incoming_key
+
+    accepted = []
+    provider_key = str(config.get("provider_api_key") or "").strip()
+    if provider_key:
+        accepted.append(provider_key)
+    else:
+        accepted.extend(str(value).strip() for value in config.get("allowed_keys", []) if str(value).strip())
+    if not accepted and config.get("provider_mode") == "new_api":
+        raise HTTPException(status_code=503, detail="Provider API key is not configured")
+    if not incoming_key or incoming_key not in accepted:
+        raise HTTPException(status_code=401, detail="Invalid or missing API Key")
+    return incoming_key
+
+
+def _validate_chat_request(payload: dict[str, Any]) -> tuple[str, bool]:
+    model = payload.get("model", "lite")
+    if not isinstance(model, str) or not model.strip() or len(model.strip()) > 160:
+        raise HTTPException(status_code=400, detail="model must be a non-empty string")
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise HTTPException(status_code=400, detail="messages must be a non-empty array")
+    if any(not isinstance(message, dict) for message in messages):
+        raise HTTPException(status_code=400, detail="messages must contain objects")
+    stream = payload.get("stream", False)
+    if not isinstance(stream, bool):
+        raise HTTPException(status_code=400, detail="stream must be a boolean")
+    if "tools" in payload and payload["tools"] is not None and not isinstance(payload["tools"], list):
+        raise HTTPException(status_code=400, detail="tools must be an array")
+    return model.strip(), stream
+
+
+def _safe_upstream_detail(exc: Exception, fallback: str = "Qoder upstream request failed") -> str:
+    status_code = _upstream_status(exc)
+    if status_code in {401, 403}:
+        return "Qoder upstream authentication failed"
+    if status_code == 429:
+        return "Qoder upstream rate limit or quota exceeded"
+    if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
+        return "Qoder upstream request timed out"
+    return fallback
+
+
+def _upstream_status(exc: Exception, default: int = 502) -> int:
+    if isinstance(exc, HTTPException):
+        return exc.status_code
+    status_code = _status_code(exc)
+    if status_code:
+        return status_code
+    match = re.search(r"HTTP\s+(\d{3})", str(exc), re.IGNORECASE)
+    return int(match.group(1)) if match else default
 
 
 # Add initial logs
@@ -156,6 +278,36 @@ async def documents() -> HTMLResponse:
     if not env_bool("QODER_ENABLE_DOCUMENTS", True):
         raise HTTPException(status_code=404, detail="Documents page is disabled")
     return HTMLResponse(DOCS_HTML.read_text(encoding="utf-8"))
+
+
+@app.get("/healthz")
+async def healthz() -> dict[str, str]:
+    """Process liveness endpoint; it deliberately does not call Qoder."""
+    return {"status": "ok"}
+
+
+@app.get("/readyz")
+async def readyz() -> JSONResponse:
+    """Readiness endpoint for a New API upstream channel or load balancer."""
+    config = load_config()
+    accounts = db_load_accounts().get("accounts", [])
+    enabled_accounts = sum(1 for account in accounts if account.get("enabled", True))
+    provider_key_configured = bool(
+        str(config.get("provider_api_key") or "").strip()
+        or any(str(value).strip() for value in config.get("allowed_keys", []))
+    )
+    checks = {
+        "provider_key": provider_key_configured if config.get("provider_mode") == "new_api" else True,
+        "enabled_accounts": enabled_accounts > 0,
+    }
+    ready = all(checks.values())
+    body = {
+        "status": "ready" if ready else "not_ready",
+        "provider_mode": config.get("provider_mode", "standalone"),
+        "checks": checks,
+        "enabled_accounts": enabled_accounts,
+    }
+    return JSONResponse(status_code=200 if ready else 503, content=body)
 
 
 @app.get("/ui/status")
@@ -356,6 +508,11 @@ async def benchmark_models(payload: dict[str, Any] | None = None, verify: None =
     }
 
 
+@app.get("/ui/api-keys/usage")
+async def api_keys_usage(window_hours: int = 24, verify: None = Depends(check_gateway_token)) -> dict[str, Any]:
+    return get_api_key_usage(window_hours)
+
+
 @app.post("/ui/registrar/start")
 async def registrar_start(payload: dict[str, Any] | None = None, verify: None = Depends(check_gateway_token)) -> dict[str, Any]:
     """启动注册机（无限循环：parents 个母线程 × 每批 3 个子任务，直到调用 stop）。
@@ -465,11 +622,7 @@ def is_account_error(exc: Exception) -> bool:
 async def public_models(authorization: str | None = Header(default=None)) -> dict[str, Any]:
     """OpenAI-compatible model listing for clients and the console."""
     config = load_config()
-    if config.get("auth_required", False):
-        allowed_keys = config.get("allowed_keys", [])
-        incoming_key = authorization[len("Bearer "):].strip() if authorization and authorization.startswith("Bearer ") else None
-        if not incoming_key or incoming_key not in allowed_keys:
-            raise HTTPException(status_code=401, detail="Invalid or missing API Key")
+    _require_public_api_key(authorization, config)
     try:
         sess = get_active_session()
     except Exception:
@@ -491,26 +644,36 @@ async def public_models(authorization: str | None = Header(default=None)) -> dic
     }
 
 
-@app.post("/v1/chat/completions")
-async def chat_completions(payload: dict[str, Any], authorization: str | None = Header(default=None)):
-    config = load_config()
-    if config.get("auth_required", False):
-        allowed_keys = config.get("allowed_keys", [])
-        incoming_key = None
-        if authorization and authorization.startswith("Bearer "):
-            incoming_key = authorization[len("Bearer "):].strip()
-        
-        if not incoming_key or incoming_key not in allowed_keys:
-            add_log("Access denied: Invalid or missing API Key in request header.", "WARNING")
-            raise HTTPException(status_code=401, detail="Invalid or missing API Key")
+@app.api_route("/v1/responses", methods=["GET", "POST", "DELETE"])
+async def unsupported_responses(authorization: str | None = Header(default=None)) -> None:
+    _require_public_api_key(authorization, load_config())
+    raise HTTPException(status_code=404, detail="The QoderGateway provider supports Chat Completions only")
 
-    model = payload.get("model", "lite")
-    stream = bool(payload.get("stream", False))
+
+@app.api_route("/responses/compact", methods=["POST"])
+async def unsupported_compact(authorization: str | None = Header(default=None)) -> None:
+    _require_public_api_key(authorization, load_config())
+    raise HTTPException(status_code=404, detail="The QoderGateway provider does not support remote compaction")
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+    x_request_id: str | None = Header(default=None, alias="X-Request-ID"),
+):
+    config = load_config()
+    incoming_key = _require_public_api_key(authorization, config)
+    model, stream = _validate_chat_request(payload)
+    request_id = (x_request_id or "").strip()[:160] or uuid.uuid4().hex
+    api_key_hash = api_key_fingerprint(incoming_key)
+    request_source = "new_api" if config.get("provider_mode") == "new_api" else "proxy"
     messages_count = len(payload.get("messages", []))
     add_log(f"Incoming completion request: model={model}, stream={stream}, messages={messages_count}")
     accounts_data = db_load_accounts()
     enabled_count = sum(1 for acc in accounts_data["accounts"] if acc.get("enabled", True))
     max_retries = max(1, enabled_count)
+    last_quota_error = False
     
     for attempt in range(max_retries):
         attempt_started = time.perf_counter()
@@ -519,7 +682,8 @@ async def chat_completions(payload: dict[str, Any], authorization: str | None = 
             sess = await get_session()
             add_log(f"Request routing via account: {sess.identity.name} ({sess.identity.uid})")
             if stream:
-                gen = stream_openai_response(payload, sess)
+                usage_state: dict[str, Any] = {}
+                gen = stream_openai_response(payload, sess, usage_state)
                 first_received_at: float | None = None
                 try:
                     first_item = await gen.__anext__()
@@ -541,48 +705,71 @@ async def chat_completions(payload: dict[str, Any], authorization: str | None = 
                         raise
                     finally:
                         _safe_record_request(
+                            request_id=request_id,
                             model=str(model),
                             account_uid=sess.identity.uid,
                             region=sess.region,
-                            source="proxy",
+                            source=request_source,
                             success=success,
                             total_ms=(time.perf_counter() - attempt_started) * 1000,
                             ttft_ms=((first_received_at - attempt_started) * 1000) if first_received_at else None,
-                            status_code=200 if success else _status_code(stream_error) if stream_error else None,
-                            error=str(stream_error)[:500] if stream_error else None,
+                            status_code=200 if success else _upstream_status(stream_error) if stream_error else None,
+                            error=_safe_upstream_detail(stream_error) if stream_error else None,
+                            api_key_hash=api_key_hash,
+                            prompt_tokens=(usage_state.get("usage") or {}).get("prompt_tokens"),
+                            completion_tokens=(usage_state.get("usage") or {}).get("completion_tokens"),
+                            total_tokens=(usage_state.get("usage") or {}).get("total_tokens"),
+                            tokens_estimated=bool(usage_state.get("estimated")),
                         )
 
                 add_log(f"Streaming response initiated (Attempt {attempt+1}/{max_retries}).")
                 return StreamingResponse(
                     stream_success_wrapper(first_item, gen),
                     media_type="text/event-stream",
-                    headers={"Cache-Control": "no-cache"}
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                        "X-Request-ID": request_id,
+                    },
                 )
             else:
                 add_log(f"Generating full completion response (Attempt {attempt+1}/{max_retries})...")
                 resp = await complete_openai_response(payload, sess)
                 add_log("Completion request finished successfully.")
+                usage = resp.get("usage") or {}
+                estimated = bool(resp.pop("_qodergate_usage_estimated", False))
                 _safe_record_request(
+                    request_id=request_id,
                     model=str(model),
                     account_uid=sess.identity.uid,
                     region=sess.region,
-                    source="proxy",
+                    source=request_source,
                     success=True,
                     total_ms=(time.perf_counter() - attempt_started) * 1000,
                     status_code=200,
+                    api_key_hash=api_key_hash,
+                    prompt_tokens=usage.get("prompt_tokens"),
+                    completion_tokens=usage.get("completion_tokens"),
+                    total_tokens=usage.get("total_tokens"),
+                    tokens_estimated=estimated,
                 )
-                return resp
+                return JSONResponse(content=resp, headers={"X-Request-ID": request_id})
         except Exception as exc:
             current_uid = sess.identity.uid if sess is not None else "unknown"
+            last_quota_error = is_quota_error(exc)
+            safe_detail = _safe_upstream_detail(exc)
             _safe_record_request(
+                request_id=request_id,
                 model=str(model),
                 account_uid=sess.identity.uid if sess is not None else None,
                 region=sess.region if sess is not None else configured_region(),
-                source="proxy",
+                source=request_source,
                 success=False,
                 total_ms=(time.perf_counter() - attempt_started) * 1000,
-                status_code=_status_code(exc),
-                error=str(exc),
+                status_code=_upstream_status(exc),
+                error=safe_detail,
+                api_key_hash=api_key_hash,
             )
             if is_account_error(exc):
                 if is_quota_error(exc):
@@ -593,24 +780,29 @@ async def chat_completions(payload: dict[str, Any], authorization: str | None = 
                         truly_exceeded = bool(quota.get("isQuotaExceeded")) or (quota.get("userQuota") or {}).get("remaining", 1) <= 0
                         if not truly_exceeded:
                             add_log(f"Quota check on {current_uid}: NOT exceeded (remaining={quota.get('userQuota', {}).get('remaining')}), not rotating.", "WARNING")
-                            raise HTTPException(status_code=502, detail=f"{exc}")
+                            raise HTTPException(status_code=502, detail=safe_detail)
                         add_log(f"Quota confirmed exceeded for {current_uid}: {exc}. Rotating...", "WARNING")
                     else:
                         # 限额查询失败：无法确认，保守不跳过账户
                         add_log(f"Quota check failed for {current_uid} ({q.get('error')}), not rotating.", "WARNING")
-                        raise HTTPException(status_code=502, detail=f"{exc}")
+                        raise HTTPException(status_code=502, detail=safe_detail)
                 else:
                     add_log(f"Account-level error on {current_uid}: {exc}. Rotating to next account...", "WARNING")
                 try:
                     rotate_next_account(current_uid, str(exc))
                 except Exception as e:
                     add_log(f"Failed to rotate account: {e}", "ERROR")
-                    raise HTTPException(status_code=502, detail=f"Request failed and no other account is available. Error: {exc}")
+                    status_code = 429 if is_quota_error(exc) else 502
+                    raise HTTPException(status_code=status_code, detail=safe_detail)
             else:
                 add_log(f"Transient error on account {current_uid}: {exc}. Not rotating account.", "WARNING")
-                raise HTTPException(status_code=502, detail=str(exc))
+                status_code = 504 if isinstance(exc, (httpx.TimeoutException, TimeoutError)) else 502
+                raise HTTPException(status_code=status_code, detail=safe_detail)
                 
-    raise HTTPException(status_code=502, detail="Request failed on all available accounts.")
+    raise HTTPException(
+        status_code=429 if last_quota_error else 502,
+        detail="Qoder upstream quota exceeded" if last_quota_error else "Request failed on all available accounts.",
+    )
 
 
 def main() -> None:

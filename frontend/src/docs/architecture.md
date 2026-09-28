@@ -5,7 +5,8 @@ QoderGate bridges OpenAI-compatible clients to Qoder sessions.
 ## Request Flow
 
 ```text
-Client
+User/client
+  -> New API (users, groups, quotas, audit)
   -> FastAPI /v1/chat/completions
   -> API key validation
   -> SQLite account router

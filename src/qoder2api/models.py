@@ -10,7 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from .bridge import build_qoder_body, qoder_stream_lines
-from .env import httpx_client_kwargs
+from .env import httpx_client_kwargs, provider_mode, provider_model_ids
 from .regions import configured_region, get_region, normalize_region
 from .telemetry import record_request
 
@@ -40,6 +40,22 @@ def fallback_models(region: str) -> list[dict[str, Any]]:
     return [
         {**item, "source": "gateway-catalog", "available": True}
         for item in _CATALOGS[normalize_region(region)]
+    ]
+
+
+def provider_models(region: str) -> list[dict[str, Any]]:
+    """Return the stable model catalog exposed to an upstream New API channel."""
+    configured = provider_model_ids()
+    if not configured:
+        return fallback_models(region)
+    known = {item["id"]: item for item in fallback_models(region)}
+    return [
+        {
+            **known.get(model, {"id": model, "label": model, "key": model}),
+            "source": "provider-config",
+            "available": True,
+        }
+        for model in configured
     ]
 
 
@@ -84,6 +100,8 @@ def _parse_discovered_models(data: Any) -> list[dict[str, Any]]:
 
 async def discover_models(sess: Any | None, region: str | None = None) -> tuple[list[dict[str, Any]], str]:
     """Try the regional model directory, then return a safe fallback catalog."""
+    if provider_mode() == "new_api":
+        return provider_models(normalize_region(region or configured_region())), "provider-config"
     if sess is None:
         return fallback_models(normalize_region(region or configured_region())), "gateway-catalog"
     region = normalize_region(sess.region)

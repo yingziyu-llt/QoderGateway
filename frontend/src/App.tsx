@@ -16,6 +16,31 @@ interface Account {
 interface AccountsConfig { accounts: Account[]; active_uid: string | null }
 interface UIStatus { ready: boolean; mode: string; username: string | null; uid: string | null; user_type: string | null; error: string | null; accounts_count: number }
 interface APIConfig { auth_required: boolean; allowed_keys: string[] }
+interface APIKeyUsageSummary {
+  requests: number
+  successes: number
+  failures: number
+  success_rate: number | null
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  token_events: number
+  estimated_token_events: number
+}
+interface APIKeyUsageItem extends APIKeyUsageSummary {
+  fingerprint: string
+  label: string
+  configured: boolean
+  by_model: Record<string, APIKeyUsageSummary>
+}
+interface APIKeyUsagePayload {
+  window_hours: number
+  total_requests: number
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  keys: APIKeyUsageItem[]
+}
 interface Message { role: 'user' | 'assistant'; content: string }
 interface ModelMetrics {
   requests?: number
@@ -116,7 +141,7 @@ const UI_TEXT = {
     accounts: { desc: 'Manage Qoder accounts used by the gateway for request routing and failover.', refreshStatus: 'Refresh Status', importAccounts: 'Import Accounts', search: 'Search accounts...', empty: 'No accounts imported. Click Import Accounts or add a PAT from Dashboard.', showing: 'Showing {count} account(s)' },
     models: { desc: 'Inspect the regional model catalog, recent traffic, and real response timings.', refresh: 'Refresh Catalog', catalog: 'Catalog', upstream: 'Upstream', gatewayCatalog: 'Gateway catalog', recent24h: 'Recent 24h', requests: 'Requests', activeAccount: 'Active Account', availableModels: 'Available Models', recentTraffic: 'Recent Traffic', benchmark: 'Benchmark Selected', benchmarkAll: 'Benchmark Top Models', benchmarking: 'Testing...', selectAll: 'Select all', selected: 'selected', model: 'Model', source: 'Source', successRate: 'Success', ttft: 'First token', totalTime: 'Total time', lastUsed: 'Last used', noMetrics: 'No traffic yet', noRecent: 'No recent requests', benchmarkResults: 'Benchmark Results', benchmarkHint: 'Tests use a short real request on the active account and consume a small amount of quota.', testPrompt: 'Test prompt', defaultPrompt: 'Reply with exactly: OK', passed: 'Passed', failed: 'Failed', noAccount: 'Add or activate an account before benchmarking.' },
     playground: { modelConfig: 'Model Configuration', streamResponse: 'Stream Response', systemPrompt: 'System Prompt', systemPromptPlaceholder: "Define the AI's persona...", ask: 'Ask anything...', send: 'Send', waiting: 'Waiting for response...' },
-    api: { generate: 'Generate New Key', desc: 'Manage authentication keys and gateway access permissions for client requests.', gatewayAuth: 'Gateway Authentication', gatewayAuthDesc: 'Toggle API key validation for incoming /v1 requests.', systemStatus: 'System Status', activeKeys: 'Active Keys', configured: 'configured', activeAccessKeys: 'Active Access Keys', keyPlaceholder: 'Enter or paste a key...', noKeys: 'No API keys configured. Generate one above.', bestPractices: 'Security Best Practices', bestPracticesDesc: 'Do not expose API keys in client-side code. Rotate keys when they appear in logs, screenshots, or shared scripts.', securityPolicy: 'Security Policy' },
+    api: { generate: 'Generate New Key', desc: 'Manage authentication keys and gateway access permissions for client requests.', gatewayAuth: 'Gateway Authentication', gatewayAuthDesc: 'Toggle API key validation for incoming /v1 requests.', systemStatus: 'System Status', activeKeys: 'Active Keys', configured: 'configured', activeAccessKeys: 'Active Access Keys', keyPlaceholder: 'Enter or paste a key...', noKeys: 'No API keys configured. Generate one above.', usageTitle: 'API Key Usage', usageDesc: 'Recent 24-hour request and token usage grouped by API key and model.', usageRefresh: 'Refresh Usage', usageKey: 'API Key', usageModel: 'Model', usageRequests: 'Requests', inputTokens: 'Input tokens', outputTokens: 'Output tokens', totalTokens: 'Total tokens', estimated: 'estimated', noUsage: 'No API key traffic recorded yet', anonymous: 'Anonymous', bestPractices: 'Security Best Practices', bestPracticesDesc: 'Do not expose API keys in client-side code. Rotate keys when they appear in logs, screenshots, or shared scripts.', securityPolicy: 'Security Policy' },
     logs: { account: 'Account', status: 'Status', range: 'Range', allAccounts: 'All Accounts', allStatuses: 'All Statuses', last24h: 'Last 24h', lastHour: 'Last hour', last7d: 'Last 7 days', noLogs: 'No logs available', noMatch: 'No logs match current filters', timestamp: 'Timestamp', level: 'Level', message: 'Message' },
     register: {
       desc: 'Register multiple Qoder accounts in parallel, pull device credentials and auto-save them into the pool. Browsers stay hidden in the background; each task pops to top once for human verification, then hides again — finish one, next takes its turn.',
@@ -165,7 +190,7 @@ const UI_TEXT = {
     accounts: { desc: '管理网关用于请求路由和失败切换的 Qoder 账号。', refreshStatus: '刷新状态', importAccounts: '导入账号', search: '搜索账号...', empty: '还没有导入账号。点击导入账号，或在控制台添加 PAT。', showing: '共 {count} 个账号' },
     models: { desc: '查看当前区域模型目录、近期访问情况和真实响应耗时。', refresh: '刷新目录', catalog: '目录来源', upstream: '上游目录', gatewayCatalog: '网关目录', recent24h: '最近 24 小时', requests: '请求数', activeAccount: '当前账号', availableModels: '可用模型', recentTraffic: '近期访问', benchmark: '测试选中模型', benchmarkAll: '测试常用模型', benchmarking: '测试中...', selectAll: '全选', selected: '已选', model: '模型', source: '来源', successRate: '成功率', ttft: '首字节', totalTime: '总耗时', lastUsed: '最近使用', noMetrics: '暂无访问', noRecent: '暂无近期请求', benchmarkResults: '测速结果', benchmarkHint: '测速会使用当前账号发起一个很短的真实请求，会消耗少量额度。', testPrompt: '测试提示词', defaultPrompt: '只回复：OK', passed: '成功', failed: '失败', noAccount: '请先添加并激活一个账号，再开始测速。' },
     playground: { modelConfig: '模型配置', streamResponse: '流式响应', systemPrompt: '系统提示词', systemPromptPlaceholder: '定义模型的角色或行为...', ask: '输入要发送的内容...', send: '发送', waiting: '正在等待响应...' },
-    api: { generate: '生成新 Key', desc: '管理客户端请求网关时使用的 API Key 和访问权限。', gatewayAuth: '网关 API 鉴权', gatewayAuthDesc: '控制 /v1 请求是否必须携带 API Key。', systemStatus: '系统状态', activeKeys: '可用 Key', configured: '已配置', activeAccessKeys: '已启用的 API Key', keyPlaceholder: '输入或粘贴 API Key...', noKeys: '还没有配置 API Key。请先生成并添加。', bestPractices: '安全建议', bestPracticesDesc: '不要把 API Key 写在前端代码里。如果 Key 出现在日志、截图或共享脚本中，请及时删除并重新生成。', securityPolicy: '安全策略' },
+    api: { generate: '生成新 Key', desc: '管理客户端请求网关时使用的 API Key 和访问权限。', gatewayAuth: '网关 API 鉴权', gatewayAuthDesc: '控制 /v1 请求是否必须携带 API Key。', systemStatus: '系统状态', activeKeys: '可用 Key', configured: '已配置', activeAccessKeys: '已启用的 API Key', keyPlaceholder: '输入或粘贴 API Key...', noKeys: '还没有配置 API Key。请先生成并添加。', usageTitle: 'API Key 用量', usageDesc: '按 API Key 和模型统计最近 24 小时的请求与 token 用量。', usageRefresh: '刷新用量', usageKey: 'API Key', usageModel: '模型', usageRequests: '请求数', inputTokens: '输入 token', outputTokens: '输出 token', totalTokens: '总 token', estimated: '估算', noUsage: '还没有记录到 API Key 流量', anonymous: '未携带 Key', bestPractices: '安全建议', bestPracticesDesc: '不要把 API Key 写在前端代码里。如果 Key 出现在日志、截图或共享脚本中，请及时删除并重新生成。', securityPolicy: '安全策略' },
     logs: { account: '账号', status: '级别', range: '时间范围', allAccounts: '全部账号', allStatuses: '全部级别', last24h: '最近 24 小时', lastHour: '最近 1 小时', last7d: '最近 7 天', noLogs: '暂无日志', noMatch: '没有匹配当前筛选条件的日志', timestamp: '时间', level: '级别', message: '内容' },
     register: {
       desc: '并行注册多个 Qoder 账号并拉取 Device 凭据，成功后自动入库。浏览器平时隐藏后台，人机验证时置顶显示，划完一个自动轮到下一个。',
@@ -575,6 +600,7 @@ export default function App() {
   const [status, setStatus] = useState<UIStatus>({ ready: false, mode: 'none', username: null, uid: null, user_type: null, error: null, accounts_count: 0 })
   const [accountsConfig, setAccountsConfig] = useState<AccountsConfig>({ accounts: [], active_uid: null })
   const [apiConfig, setApiConfig] = useState<APIConfig>({ auth_required: false, allowed_keys: [] })
+  const [apiKeyUsage, setApiKeyUsage] = useState<APIKeyUsagePayload | null>(null)
   const [logs, setLogs] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -703,6 +729,9 @@ export default function App() {
   const fetchApiConfig = useCallback(async () => {
     try { const resp = await authedFetch('/ui/config'); const data = await resp.json(); setApiConfig(data) } catch { /* */ }
   }, [authedFetch])
+  const fetchApiKeyUsage = useCallback(async () => {
+    try { const resp = await authedFetch('/ui/api-keys/usage?window_hours=24'); const data = await resp.json(); if (resp.ok) setApiKeyUsage(data) } catch { /* */ }
+  }, [authedFetch])
   const doBatchImport = useCallback(async () => {
     let records: unknown
     try { records = JSON.parse(batchJson) } catch { pushToast('ERROR', lang === 'zh' ? 'JSON 解析失败' : 'Invalid JSON', ''); return }
@@ -780,12 +809,13 @@ export default function App() {
 
   useEffect(() => {
     if (!token) return
-    fetchStatus(); fetchAccounts(); fetchApiConfig(); fetchLogs(); fetchRegStatus()
+    fetchStatus(); fetchAccounts(); fetchApiConfig(); fetchApiKeyUsage(); fetchLogs(); fetchRegStatus()
     const si = setInterval(fetchStatus, 6000)
     const li = setInterval(() => { if (activeTab === 'logs') fetchLogs() }, 3000)
+    const ui = setInterval(() => { if (activeTab === 'api-keys') fetchApiKeyUsage() }, 10000)
     const ri = setInterval(() => { if (activeTab === 'register' && regStatus?.running) fetchRegStatus() }, 2000)
-    return () => { clearInterval(si); clearInterval(li); clearInterval(ri) }
-  }, [token, activeTab, fetchStatus, fetchAccounts, fetchApiConfig, fetchLogs, fetchRegStatus, regStatus?.running])
+    return () => { clearInterval(si); clearInterval(li); clearInterval(ui); clearInterval(ri) }
+  }, [token, activeTab, fetchStatus, fetchAccounts, fetchApiConfig, fetchApiKeyUsage, fetchLogs, fetchRegStatus, regStatus?.running])
 
   useEffect(() => { if (activeTab === 'logs') logEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [logs, activeTab])
   useEffect(() => { if (activeTab === 'playground') chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [chatMessages, activeTab])
@@ -901,6 +931,7 @@ export default function App() {
     try {
       await authedFetch('/ui/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newConfig) })
       setApiConfig(newConfig)
+      fetchApiKeyUsage()
     } catch { pushToast('ERROR', msg.configFailed, lang === 'zh' ? '无法更新 API 配置' : 'Could not update API configuration') }
   }
 
@@ -990,7 +1021,7 @@ export default function App() {
     } catch (err: any) {
       setChatMessages(prev => { const u = [...prev]; u[u.length - 1] = { role: 'assistant', content: `Connection error: ${err.message}` }; return u })
       pushToast('ERROR', msg.connectionError, err.message)
-    } finally { setGenerating(false) }
+    } finally { setGenerating(false); fetchApiKeyUsage() }
   }
 
   const renderMessageContent = (text: string) => {
@@ -1046,6 +1077,13 @@ export default function App() {
       return diff <= 60
     }
     return true
+  })
+  const formatUsageTokens = (value: number | undefined) => typeof value === 'number' ? value.toLocaleString() : '--'
+  const apiKeyUsageRows: Array<{ key: APIKeyUsageItem; model: string; summary: APIKeyUsageSummary }> = (apiKeyUsage?.keys || []).flatMap(key => {
+    const entries = Object.entries(key.by_model || {})
+    return entries.length
+      ? entries.map(([model, summary]) => ({ key, model, summary }))
+      : [{ key, model: '--', summary: key }]
   })
   // ─── LOGIN PAGE ───
   if (!token) {
@@ -1463,6 +1501,63 @@ export default function App() {
                   </div>
                 </div>
               </div>
+
+              <section className="glass-card rounded-2xl overflow-hidden shadow-sm">
+                <div className="p-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between border-b border-hairline">
+                  <div>
+                    <h2 className="font-bold text-lg text-ink">{t.api.usageTitle}</h2>
+                    <p className="text-body text-sm mt-1">{t.api.usageDesc}</p>
+                  </div>
+                  <button onClick={fetchApiKeyUsage} className="self-start md:self-auto border border-hairline-strong px-4 py-2 rounded-lg flex items-center gap-2 text-xs font-bold text-ink hover:bg-canvas-soft transition-colors">
+                    <span className="material-symbols-outlined text-[18px]">refresh</span>{t.api.usageRefresh}
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 border-b border-hairline">
+                  <div className="p-5 sm:border-r border-hairline">
+                    <div className="text-[10px] font-bold text-body uppercase tracking-widest">{t.api.usageRequests}</div>
+                    <div className="mt-2 text-2xl font-display-sm text-ink">{formatUsageTokens(apiKeyUsage?.total_requests)}</div>
+                  </div>
+                  <div className="p-5 sm:border-r border-hairline">
+                    <div className="text-[10px] font-bold text-body uppercase tracking-widest">{t.api.inputTokens}</div>
+                    <div className="mt-2 text-2xl font-display-sm text-ink">{formatUsageTokens(apiKeyUsage?.prompt_tokens)}</div>
+                  </div>
+                  <div className="p-5">
+                    <div className="text-[10px] font-bold text-body uppercase tracking-widest">{t.api.totalTokens}</div>
+                    <div className="mt-2 text-2xl font-display-sm text-ink">{formatUsageTokens(apiKeyUsage?.total_tokens)}</div>
+                  </div>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left min-w-[760px]">
+                    <thead className="bg-canvas-soft/50 border-b border-hairline">
+                      <tr>
+                        {[t.api.usageKey, t.api.usageModel, t.api.usageRequests, t.api.inputTokens, t.api.outputTokens, t.api.totalTokens].map(header => (
+                          <th key={header} className="px-6 py-4 text-[10px] font-semibold text-body uppercase tracking-widest">{header}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-hairline">
+                      {apiKeyUsageRows.length === 0 ? (
+                        <tr><td colSpan={6} className="py-8 text-center text-xs text-body font-medium">{t.api.noUsage}</td></tr>
+                      ) : apiKeyUsageRows.map(({ key, model: usageModel, summary }) => (
+                        <tr key={`${key.fingerprint}:${usageModel}`} className="hover:bg-canvas-soft/30 transition-colors">
+                          <td className="px-6 py-4">
+                            <div className="font-mono text-xs text-ink">{key.configured ? key.label : key.fingerprint === 'anonymous' ? t.api.anonymous : key.label}</div>
+                            <div className="text-[10px] text-body mt-1">{key.configured ? t.api.configured : t.api.anonymous}</div>
+                          </td>
+                          <td className="px-6 py-4 font-mono text-xs text-body">{usageModel}</td>
+                          <td className="px-6 py-4 text-sm font-semibold text-ink">{formatUsageTokens(summary.requests)}</td>
+                          <td className="px-6 py-4 text-sm text-body">{formatUsageTokens(summary.prompt_tokens)}</td>
+                          <td className="px-6 py-4 text-sm text-body">{formatUsageTokens(summary.completion_tokens)}</td>
+                          <td className="px-6 py-4">
+                            <div className="text-sm font-semibold text-ink">{formatUsageTokens(summary.total_tokens)}</div>
+                            {summary.estimated_token_events > 0 && <div className="text-[10px] text-amber-600 mt-1">~ {t.api.estimated}</div>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
 
               <section className="bg-ink text-white p-8 rounded-2xl flex items-center justify-between relative overflow-hidden shadow-xl">
                 <div className="relative z-10 max-w-xl">
