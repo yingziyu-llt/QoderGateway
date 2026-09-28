@@ -10,6 +10,7 @@ import httpx
 
 from . import encoding
 from .auth import SessionContext, bearer_headers
+from .catalog import cn_model_key, global_model_key
 from .env import httpx_client_kwargs
 from .regions import get_region
 
@@ -18,24 +19,6 @@ QODER_CHAT_URL = "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_g
 # 新版协议（Qoder CLI 现行）：OpenAI 兼容端点，纯 Bearer，无 COSY 签名，响应为标准 OpenAI SSE。
 # 性能远优于老版（老版默认带长 reasoning，复杂任务可到分钟级）。
 QODER_CHAT_URL_NEW = "https://api2-v2.qoder.sh/model/v1/chat/completions"
-
-_CN_MODEL_KEYS = {
-    "auto": "auto",
-    "lite": "auto",
-    "qwen3.7-max": "qmodel_latest",
-    "qwen3.7plus": "qmodel",
-    "qwen3.7-plus": "qmodel",
-    "qwen3.6-flash": "q36fmodel",
-    "deepseek-v4-pro": "dmodel",
-    "deepseek-v4-flash": "dfmodel",
-    "glm-5.2": "gm51model",
-    "kimi-k2.7-code": "kmodel",
-    "minimax-m2.7": "mmodel",
-}
-
-
-def cn_model_key(model: str) -> str:
-    return _CN_MODEL_KEYS.get(model.strip().lower(), model)
 
 
 def now_ms() -> int:
@@ -405,7 +388,7 @@ def build_qoder_body(req: dict[str, Any], sess: SessionContext) -> tuple[dict[st
         return build_cn_qoder_body(req, model), model, tools_enabled
     rid = str(uuid.uuid4())
     body: dict[str, Any] = {
-        "model": model,
+        "model": global_model_key(model),
         "messages": copy.deepcopy(messages or []),
         "stream": True,
         "stream_options": {"include_usage": True},

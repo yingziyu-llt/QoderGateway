@@ -15,31 +15,19 @@ from .regions import configured_region, get_region, normalize_region
 from .telemetry import record_request
 
 
-# Qoder does not expose the same model-list endpoint in both regions.  These
-# entries are the protocol keys already supported by the bridge and form the
-# fallback catalog when upstream discovery is unavailable.
-_CATALOGS: dict[str, list[dict[str, str]]] = {
-    "global": [
-        {"id": "lite", "label": "Lite", "key": "lite"},
-    ],
-    "cn": [
-        {"id": "lite", "label": "Lite / Auto", "key": "auto"},
-        {"id": "qwen3.7-max", "label": "Qwen 3.7 Max", "key": "qmodel_latest"},
-        {"id": "qwen3.7-plus", "label": "Qwen 3.7 Plus", "key": "qmodel"},
-        {"id": "qwen3.6-flash", "label": "Qwen 3.6 Flash", "key": "q36fmodel"},
-        {"id": "deepseek-v4-pro", "label": "DeepSeek V4 Pro", "key": "dmodel"},
-        {"id": "deepseek-v4-flash", "label": "DeepSeek V4 Flash", "key": "dfmodel"},
-        {"id": "glm-5.2", "label": "GLM 5.2", "key": "gm51model"},
-        {"id": "kimi-k2.7-code", "label": "Kimi K2.7 Code", "key": "kmodel"},
-        {"id": "minimax-m2.7", "label": "MiniMax M2.7", "key": "mmodel"},
-    ],
-}
+from .auth import bearer_headers
+from .bridge import build_qoder_body, qoder_stream_lines
+from .catalog import catalog_entries, parse_model_list
+from .env import httpx_client_kwargs, provider_mode, provider_model_ids
+from .regions import configured_region, get_region, normalize_region
+from .telemetry import record_request
 
 
 def fallback_models(region: str) -> list[dict[str, Any]]:
+    """Return the built-in catalog for a region (see ``catalog.py``)."""
     return [
-        {**item, "source": "gateway-catalog", "available": True}
-        for item in _CATALOGS[normalize_region(region)]
+        {**entry, "source": "gateway-catalog", "available": True}
+        for entry in catalog_entries(region)
     ]
 
 
@@ -98,35 +86,59 @@ def _parse_discovered_models(data: Any) -> list[dict[str, Any]]:
     return result
 
 
+async def _discover_model_list(sess: Any) -> list[dict[str, Any]]:
+    """Query the Qoder client model-list endpoint (both regions expose it)."""
+    endpoint = get_region(sess.region).model_list_url
+    headers = bearer_headers(sess, endpoint, "", "application/json", {"x-model-source": "system"})
+    async with httpx.AsyncClient(timeout=10, **httpx_client_kwargs()) as client:
+        response = await client.get(endpoint, headers=headers)
+    if response.status_code != 200:
+        return []
+    return [
+        {**row, "source": "upstream", "available": True}
+        for row in parse_model_list(response.json())
+    ]
+
+
+async def _discover_modern_models(sess: Any) -> list[dict[str, Any]]:
+    """Fallback for the global region: the OpenAI-compatible ``/models`` route."""
+    endpoint = _models_endpoint(get_region("global").modern_chat_url or "")
+    async with httpx.AsyncClient(timeout=10, **httpx_client_kwargs()) as client:
+        response = await client.get(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {sess.identity.security_oauth_token}",
+                "Accept": "application/json",
+                "User-Agent": "qoder2api-python",
+            },
+        )
+    if response.status_code != 200:
+        return []
+    return _parse_discovered_models(response.json())
+
+
+async def _discover_upstream(sess: Any) -> list[dict[str, Any]]:
+    """Best-effort upstream discovery; failure falls back to the static catalog."""
+    for attempt in (_discover_model_list, _discover_modern_models):
+        try:
+            discovered = await attempt(sess)
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+        if discovered:
+            return discovered
+    return []
+
+
 async def discover_models(sess: Any | None, region: str | None = None) -> tuple[list[dict[str, Any]], str]:
     """Try the regional model directory, then return a safe fallback catalog."""
     if provider_mode() == "new_api":
         return provider_models(normalize_region(region or configured_region())), "provider-config"
-    if sess is None:
-        return fallback_models(normalize_region(region or configured_region())), "gateway-catalog"
-    region = normalize_region(sess.region)
-    if region != "global":
-        # The CN legacy gateway currently has no documented model-list route.
-        return fallback_models(region), "gateway-catalog"
-
-    endpoint = _models_endpoint(get_region("global").modern_chat_url or "")
-    try:
-        async with httpx.AsyncClient(timeout=10, **httpx_client_kwargs()) as client:
-            response = await client.get(
-                endpoint,
-                headers={
-                    "Authorization": f"Bearer {sess.identity.security_oauth_token}",
-                    "Accept": "application/json",
-                    "User-Agent": "qoder2api-python",
-                },
-            )
-        if response.status_code == 200:
-            discovered = _parse_discovered_models(response.json())
-            if discovered:
-                return discovered, "upstream"
-    except (httpx.HTTPError, ValueError):
-        pass
-    return fallback_models(region), "gateway-catalog"
+    resolved = normalize_region(region or (getattr(sess, "region", None) if sess is not None else None) or configured_region())
+    if sess is not None:
+        discovered = await _discover_upstream(sess)
+        if discovered:
+            return discovered, "upstream"
+    return fallback_models(resolved), "gateway-catalog"
 
 
 async def benchmark_model(sess: Any, model: str, prompt: str) -> dict[str, Any]:

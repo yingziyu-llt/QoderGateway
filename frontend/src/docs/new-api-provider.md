@@ -23,8 +23,10 @@ For China, use the supported regional model IDs, for example:
 
 ```env
 QODER_REGION=cn
-QODER_PROVIDER_MODELS=lite,qwen3.7-max,qwen3.7-plus,qwen3.6-flash
+QODER_PROVIDER_MODELS=lite,qwen3.8-max,qwen3.8-flash,glm-5.3,kimi-k3
 ```
+
+When `QODER_PROVIDER_MODELS` is empty the regional catalog is used: the gateway first pulls the live model list from Qoder (`algo/api/v2/model/list`) and falls back to the built-in catalog. The built-in CN catalog is: `auto`, `lite`, `qwen3.8-max`, `qwen3.8-flash`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.7-flash`, `deepseek-v4-pro`, `deepseek-flash`, `glm-5.3`, `glm-5.3-flash`, `glm-5.2`, `kimi-k3`, `kimi-k2.8-preview`, `minimax-m2.7`.
 
 Keep at least one Qoder account enabled and check:
 

@@ -23,8 +23,10 @@ QODER_REGION=global
 
 ```env
 QODER_REGION=cn
-QODER_PROVIDER_MODELS=lite,qwen3.7-max,qwen3.7-plus,qwen3.6-flash
+QODER_PROVIDER_MODELS=lite,qwen3.8-max,qwen3.8-flash,glm-5.3,kimi-k3
 ```
+
+`QODER_PROVIDER_MODELS` 留空时会自动使用区域目录：网关优先向 Qoder 拉取实时模型列表（`algo/api/v2/model/list`），失败时回退到内置目录。内置的 CN 目录为：`auto`、`lite`、`qwen3.8-max`、`qwen3.8-flash`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.7-flash`、`deepseek-v4-pro`、`deepseek-flash`、`glm-5.3`、`glm-5.3-flash`、`glm-5.2`、`kimi-k3`、`kimi-k2.8-preview`、`minimax-m2.7`。
 
 确保至少有一个启用的 Qoder 账号，然后检查：
 
