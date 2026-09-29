@@ -54,6 +54,8 @@ def record_request(
     prompt_tokens: int | None = None,
     completion_tokens: int | None = None,
     total_tokens: int | None = None,
+    cached_tokens: int | None = None,
+    reasoning_tokens: int | None = None,
     tokens_estimated: bool = False,
 ) -> None:
     """Append one request attempt and keep a bounded recent history."""
@@ -75,6 +77,8 @@ def record_request(
         "prompt_tokens": _nonnegative_int(prompt_tokens),
         "completion_tokens": _nonnegative_int(completion_tokens),
         "total_tokens": _nonnegative_int(total_tokens),
+        "cached_tokens": _nonnegative_int(cached_tokens),
+        "reasoning_tokens": _nonnegative_int(reasoning_tokens),
         "tokens_estimated": 1 if tokens_estimated else 0,
     }
     try:
@@ -84,15 +88,16 @@ def record_request(
                 INSERT INTO request_events (
                 request_id, created_at, model, account_uid, region, source, success,
                 status_code, ttft_ms, total_ms, error, api_key_hash,
-                prompt_tokens, completion_tokens, total_tokens, tokens_estimated
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                prompt_tokens, completion_tokens, total_tokens, cached_tokens,
+                reasoning_tokens, tokens_estimated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event["request_id"], event["created_at"], event["model"], event["account_uid"], event["region"],
                     event["source"], event["success"], event["status_code"], event["ttft_ms"],
                     event["total_ms"], event["error"], event["api_key_hash"],
                     event["prompt_tokens"], event["completion_tokens"], event["total_tokens"],
-                    event["tokens_estimated"],
+                    event["cached_tokens"], event["reasoning_tokens"], event["tokens_estimated"],
                 ),
             )
             # Keep the database small while preserving enough history for a useful
@@ -143,6 +148,9 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     prompt_tokens = [int(row["prompt_tokens"]) for row in rows if row.get("prompt_tokens") is not None]
     completion_tokens = [int(row["completion_tokens"]) for row in rows if row.get("completion_tokens") is not None]
     total_tokens = [int(row["total_tokens"]) for row in rows if row.get("total_tokens") is not None]
+    cached_rows = [row for row in rows if row.get("cached_tokens") is not None]
+    cached_tokens = [int(row["cached_tokens"]) for row in cached_rows]
+    cache_prompt_tokens = [int(row["prompt_tokens"]) for row in cached_rows if row.get("prompt_tokens") is not None]
     return {
         "requests": requests,
         "successes": successes,
@@ -156,6 +164,9 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "prompt_tokens": sum(prompt_tokens),
         "completion_tokens": sum(completion_tokens),
         "total_tokens": sum(total_tokens),
+        "cached_tokens": sum(cached_tokens),
+        "cache_token_events": len(cached_tokens),
+        "cache_hit_rate": round(sum(cached_tokens) / sum(cache_prompt_tokens), 4) if sum(cache_prompt_tokens) > 0 else None,
         "token_events": len(total_tokens),
         "estimated_token_events": sum(1 for row in rows if row.get("tokens_estimated")),
     }
@@ -171,7 +182,8 @@ def get_model_metrics(window_hours: int = 24) -> dict[str, Any]:
                 """
                 SELECT request_id, created_at, model, account_uid, region, source, success,
                        status_code, ttft_ms, total_ms, error, api_key_hash,
-                       prompt_tokens, completion_tokens, total_tokens, tokens_estimated
+                       prompt_tokens, completion_tokens, total_tokens, cached_tokens,
+                       reasoning_tokens, tokens_estimated
                 FROM request_events
                 WHERE created_at >= ?
                 ORDER BY created_at DESC
@@ -215,6 +227,8 @@ def get_model_metrics(window_hours: int = 24) -> dict[str, Any]:
                 "prompt_tokens": row.get("prompt_tokens"),
                 "completion_tokens": row.get("completion_tokens"),
                 "total_tokens": row.get("total_tokens"),
+                "cached_tokens": row.get("cached_tokens"),
+                "reasoning_tokens": row.get("reasoning_tokens"),
                 "tokens_estimated": bool(row.get("tokens_estimated")),
             }
         )
@@ -238,8 +252,8 @@ def get_api_key_usage(window_hours: int = 24) -> dict[str, Any]:
             raw = conn.execute(
                 """
                 SELECT request_id, created_at, model, api_key_hash, source, success,
-                       prompt_tokens, completion_tokens, total_tokens, tokens_estimated,
-                       ttft_ms, total_ms
+                       prompt_tokens, completion_tokens, total_tokens, cached_tokens,
+                       reasoning_tokens, tokens_estimated, ttft_ms, total_ms
                 FROM request_events
                 WHERE created_at >= ?
                 ORDER BY created_at DESC
@@ -284,5 +298,6 @@ def get_api_key_usage(window_hours: int = 24) -> dict[str, Any]:
         "total_tokens": sum(item.get("total_tokens", 0) for item in keys),
         "prompt_tokens": sum(item.get("prompt_tokens", 0) for item in keys),
         "completion_tokens": sum(item.get("completion_tokens", 0) for item in keys),
+        "cached_tokens": sum(item.get("cached_tokens", 0) for item in keys),
         "keys": keys,
     }

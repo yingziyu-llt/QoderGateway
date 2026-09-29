@@ -31,7 +31,8 @@ Special thanks to the [LINUX DO](https://linux.do) community for the platform of
 - **两层鉴权** — 管理后台密钥与外部 API Key 分开配置
 - **SQLite 持久化** — 账号、API Key、全局配置全部存入本地数据库
 - **WebUI 控制台** — Dashboard、账号管理、API Key 管理、Playground、服务日志
-- **模型观测页** — 拉取当前区域模型目录，查看近 24 小时实际访问的成功率/首字节/总耗时，并对选中模型做短请求测速
+- **模型观测页** — 拉取当前区域模型目录，查看近 24 小时实际访问的成功率/首字节/总耗时/缓存命中率，并对选中模型做短请求测速
+- **Prompt 缓存统计** — 透传 `prompt_tokens_details.cached_tokens`，API Key 用量页展示缓存命中率，兼容 DeepSeek/Anthropic 风格的上游计数
 - **独立文档站** — `/documents` 提供中英文 Wiki，支持本地搜索和目录跳转
 - **New API 上游渠道** — 可作为标准 OpenAI 渠道接入 New API，由 New API 统一管理用户、模型权限、配额和审计
 - **自动检测语言** — 根据浏览器地区自动切换中文/英文

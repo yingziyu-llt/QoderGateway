@@ -71,4 +71,4 @@ Direct calls to QoderGateway bypass New API user quotas, model permissions, and 
 
 ## Usage Boundary
 
-Qoder sometimes omits token usage. QoderGateway estimates it and marks the estimate in telemetry. New API accounting is internal control data, not an authoritative Qoder Credits balance or invoice.
+Qoder sometimes omits token usage. QoderGateway estimates it and marks the estimate in telemetry. When the upstream reports prompt-cache counters, the gateway relays them as `prompt_tokens_details.cached_tokens` so New API can compute a cache hit rate. New API accounting is internal control data, not an authoritative Qoder Credits balance or invoice.

@@ -169,39 +169,130 @@ def normalize_tool_calls(raw_tool_calls: Any) -> list[dict[str, Any]] | None:
     return normalized or None
 
 
-def normalize_usage(raw: Any) -> dict[str, int] | None:
-    """Normalize the usage shapes returned by the modern and legacy gateways."""
+_USAGE_CONTAINER_KEYS = ("usage", "raw_usage", "rawUsage", "response_meta", "responseMeta")
+_VENDOR_CACHE_KEYS = (
+    "prompt_cache_hit_tokens",
+    "prompt_cache_miss_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+
+
+def _usage_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _first_int(source: Any, *keys: str) -> int | None:
+    if not isinstance(source, dict):
+        return None
+    for key in keys:
+        parsed = _usage_int(source.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _merge_usage(target: dict[str, Any], source: dict[str, Any]) -> None:
+    """Merge usage objects: first non-null scalar wins, nested detail dicts combine."""
+    for key, value in source.items():
+        if value is None:
+            continue
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _merge_usage(target[key], value)
+        elif key not in target or target[key] is None:
+            target[key] = copy.deepcopy(value)
+
+
+def _usage_candidates(raw: Any, depth: int = 0) -> list[dict[str, Any]]:
+    """Collect every dict that may carry usage, canonical containers first."""
+    if depth > 3 or not isinstance(raw, dict):
+        return []
+    candidates: list[dict[str, Any]] = []
+    for key in _USAGE_CONTAINER_KEYS:
+        nested = raw.get(key)
+        if isinstance(nested, dict):
+            candidates.extend(_usage_candidates(nested, depth + 1))
+    # The bare object comes last so stray top-level counters (for example a
+    # zeroed response_meta echo) cannot shadow a real nested usage object.
+    candidates.append(raw)
+    return candidates
+
+
+def normalize_usage(raw: Any) -> dict[str, Any] | None:
+    """Normalize the usage shapes returned by the modern and legacy gateways.
+
+    Prompt-cache counters are preserved and mapped onto the OpenAI
+    ``prompt_tokens_details.cached_tokens`` field so downstream clients (for
+    example New API) can report a cache hit rate. Container objects such as
+    ``usage``, ``raw_usage`` and ``response_meta`` are merged because Qoder's
+    provider payload can carry cache detail the normalized object omits.
+    """
     if not isinstance(raw, dict):
         return None
-    for nested_key in ("usage", "raw_usage", "rawUsage"):
-        nested = raw.get(nested_key)
-        if isinstance(nested, dict):
-            normalized = normalize_usage(nested)
-            if normalized:
-                return normalized
+    merged: dict[str, Any] = {}
+    for candidate in _usage_candidates(raw):
+        _merge_usage(merged, candidate)
 
-    def number(*keys: str) -> int | None:
-        for key in keys:
-            value = raw.get(key)
-            if value is None:
-                continue
-            try:
-                parsed = int(float(value))
-            except (TypeError, ValueError):
-                continue
-            if parsed >= 0:
-                return parsed
-        return None
-
-    prompt = number("prompt_tokens", "input_tokens", "promptTokens", "inputTokens")
-    completion = number("completion_tokens", "output_tokens", "completionTokens", "outputTokens")
-    total = number("total_tokens", "totalTokens")
+    prompt = _first_int(merged, "prompt_tokens", "input_tokens", "promptTokens", "inputTokens")
+    completion = _first_int(merged, "completion_tokens", "output_tokens", "completionTokens", "outputTokens")
+    total = _first_int(merged, "total_tokens", "totalTokens")
     if prompt is None and completion is None and total is None:
         return None
     prompt = prompt or 0
     completion = completion or 0
+
+    prompt_details = merged.get("prompt_tokens_details") or merged.get("input_tokens_details")
+    completion_details = merged.get("completion_tokens_details") or merged.get("output_tokens_details")
+
+    # OpenAI-style details are inclusive in prompt_tokens; DeepSeek-style
+    # hit/miss counters are too, while Anthropic-style cache_read counters are
+    # additive and need the prompt total widened to stay consistent.
+    cached = _first_int(prompt_details, "cached_tokens", "cachedTokens")
+    if cached is None:
+        cached = _first_int(merged, "cached_tokens", "prompt_cache_hit_tokens", "promptCacheHitTokens")
+    if cached is None:
+        cache_read = _first_int(merged, "cache_read_input_tokens", "cacheReadInputTokens")
+        if cache_read is not None:
+            cache_creation = _first_int(merged, "cache_creation_input_tokens", "cacheCreationInputTokens") or 0
+            if prompt < cache_read:
+                prompt += cache_read + cache_creation
+            cached = cache_read
+    if cached is not None and prompt:
+        cached = min(cached, prompt)
+
     total = total if total is not None else prompt + completion
-    return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
+    total = max(total, prompt + completion)
+    result: dict[str, Any] = {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
+
+    details: dict[str, int] = {}
+    if cached is not None:
+        details["cached_tokens"] = cached
+    audio = _first_int(prompt_details, "audio_tokens", "audioTokens")
+    if audio is not None:
+        details["audio_tokens"] = audio
+    if details:
+        result["prompt_tokens_details"] = details
+
+    completion_out: dict[str, int] = {}
+    reasoning = _first_int(completion_details, "reasoning_tokens", "reasoningTokens")
+    if reasoning is None:
+        reasoning = _first_int(merged, "reasoning_tokens", "reasoningTokens")
+    if reasoning is not None:
+        completion_out["reasoning_tokens"] = reasoning
+    if completion_out:
+        result["completion_tokens_details"] = completion_out
+
+    for key in _VENDOR_CACHE_KEYS:
+        value = _first_int(merged, key)
+        if value is not None:
+            result[key] = value
+    return result
 
 
 def estimate_tokens(text: str) -> int:
@@ -211,7 +302,7 @@ def estimate_tokens(text: str) -> int:
     return max(1, (len(text.encode("utf-8")) + 3) // 4)
 
 
-def estimate_usage(req: dict[str, Any], output_text: str) -> dict[str, int]:
+def estimate_usage(req: dict[str, Any], output_text: str) -> dict[str, Any]:
     prompt_payload = json.dumps(
         {"messages": req.get("messages", []), "tools": req.get("tools", [])},
         ensure_ascii=False,
@@ -223,6 +314,9 @@ def estimate_usage(req: dict[str, Any], output_text: str) -> dict[str, int]:
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": prompt_tokens + completion_tokens,
+        # Keep the OpenAI usage shape stable even when the upstream omits
+        # usage; the telemetry entry marks the estimate separately.
+        "prompt_tokens_details": {"cached_tokens": 0},
     }
 
 
@@ -299,10 +393,11 @@ def build_qoder_messages(template_messages: list[dict[str, Any]], incoming: list
 
 def build_cn_qoder_body(req: dict[str, Any], model: str) -> dict[str, Any]:
     """Build the encoded legacy body used by the CN gateway."""
-    messages = copy.deepcopy(req.get("messages") if isinstance(req.get("messages"), list) else [])
+    raw_messages = copy.deepcopy(req.get("messages") if isinstance(req.get("messages"), list) else [])
     tools = copy.deepcopy(req.get("tools") if isinstance(req.get("tools"), list) else [])
+    tools_enabled = bool(tools)
     last_user_text = ""
-    for message in reversed(messages):
+    for message in reversed(raw_messages):
         if isinstance(message, dict) and message.get("role") == "user":
             content = message.get("content")
             if isinstance(content, str):
@@ -312,6 +407,20 @@ def build_cn_qoder_body(req: dict[str, Any], model: str) -> dict[str, Any]:
                     str(part.get("text") or "") for part in content if isinstance(part, dict)
                 )
             break
+
+    # The CN gateway expects the Qoder client-native message shape. Raw OpenAI
+    # messages mostly work for plain text, but an assistant message carrying
+    # tool calls with ``"content": null`` makes the upstream return an empty
+    # completion (no reasoning, no content, finish_reason=stop).
+    messages: list[dict[str, Any]] = []
+    for message in raw_messages:
+        if not isinstance(message, dict):
+            continue
+        converted = convert_incoming_message(message, tools_enabled)
+        if converted:
+            messages.append(converted)
+    if not messages and last_user_text.strip():
+        messages.append(build_user_message(last_user_text))
 
     model_key = cn_model_key(model)
     max_tokens = req.get("max_tokens") or 32768
@@ -404,6 +513,12 @@ def build_qoder_body(req: dict[str, Any], sess: SessionContext) -> tuple[dict[st
     }
     if tools_enabled:
         body["tools"] = copy.deepcopy(req["tools"])
+    # Preserve the client's cache routing hints so upstream prompt caching can
+    # actually hit across requests.
+    for routing_key in ("prompt_cache_key", "user"):
+        routing_value = req.get(routing_key)
+        if isinstance(routing_value, str) and routing_value.strip():
+            body[routing_key] = routing_value
     return body, model, tools_enabled
 
 
@@ -412,11 +527,12 @@ class BridgeDelta:
     role: str = ""
     content: str = ""
     tool_calls: list[dict[str, Any]] | None = None
-    usage: dict[str, int] | None = None
+    usage: dict[str, Any] | None = None
+    reasoning_content: str = ""
 
     @property
     def is_empty(self) -> bool:
-        return not self.role and not self.content and not self.tool_calls and not self.usage
+        return not self.role and not self.content and not self.tool_calls and not self.usage and not self.reasoning_content
 
 
 def extract_delta(data_line: str) -> BridgeDelta:
@@ -431,9 +547,10 @@ def extract_delta(data_line: str) -> BridgeDelta:
                 delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
                 role = delta.get("role") or ""
                 content = delta.get("content") or ""
+                reasoning_content = delta.get("reasoning_content") or delta.get("reasoning") or ""
                 tool_calls = delta.get("tool_calls") if isinstance(delta.get("tool_calls"), list) else None
-                if role or content or tool_calls:
-                    return BridgeDelta(role, content, tool_calls, usage)
+                if role or content or reasoning_content or tool_calls:
+                    return BridgeDelta(role, content, tool_calls, usage, reasoning_content)
             return BridgeDelta(usage=usage)
         # 老版：wrapper 内嵌 body 字符串
         inner = obj.get("body")
@@ -457,7 +574,7 @@ def make_chunk(
     model: str,
     delta: dict[str, Any] | None = None,
     finish_reason: str | None = None,
-    usage: dict[str, int] | None = None,
+    usage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = {"id": chunk_id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": [{"index": 0, "delta": delta or {}, "finish_reason": finish_reason}]}
     if usage is not None:
@@ -544,8 +661,9 @@ async def stream_openai_response(req: dict[str, Any], sess: SessionContext, usag
     pending = ""
     streaming_text = False
     pending_role = "assistant"
-    upstream_usage: dict[str, int] | None = None
+    upstream_usage: dict[str, Any] | None = None
     output_text: list[str] = []
+    output_reasoning: list[str] = []
 
     def event(payload: dict[str, Any]) -> str:
         return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
@@ -560,6 +678,13 @@ async def stream_openai_response(req: dict[str, Any], sess: SessionContext, usag
             upstream_usage = delta.usage
         if delta.role:
             pending_role = delta.role
+        if delta.reasoning_content:
+            output_reasoning.append(delta.reasoning_content)
+            out_delta = {"reasoning_content": delta.reasoning_content}
+            if not emitted:
+                out_delta["role"] = pending_role
+            emitted = True
+            yield event(make_chunk(chunk_id, created, model, out_delta))
         if delta.tool_calls:
             pending = "" if tools_enabled and pending.lstrip().startswith("Tool calls:") else pending
             indexed = []
@@ -612,7 +737,7 @@ async def stream_openai_response(req: dict[str, Any], sess: SessionContext, usag
         yield event(make_chunk(chunk_id, created, model, {"content": pending, "role": pending_role} if not emitted else {"content": pending}))
 
     finish_reason = "tool_calls" if tool_calls.calls else "stop"
-    usage = upstream_usage or estimate_usage(req, "".join(output_text))
+    usage = upstream_usage or estimate_usage(req, "".join(output_reasoning) + "".join(output_text))
     estimated = upstream_usage is None
     if usage_state is not None:
         usage_state.clear()
@@ -627,7 +752,8 @@ async def complete_openai_response(req: dict[str, Any], sess: SessionContext) ->
     created = int(time.time())
     full = []
     tool_calls = ToolCallAccumulator()
-    upstream_usage: dict[str, int] | None = None
+    upstream_usage: dict[str, Any] | None = None
+    reasoning: list[str] = []
     async for line in qoder_stream_lines(sess, body, model):
         if not line.startswith("data:"):
             continue
@@ -636,11 +762,16 @@ async def complete_openai_response(req: dict[str, Any], sess: SessionContext) ->
             upstream_usage = delta.usage
         if delta.content:
             full.append(delta.content)
+        if delta.reasoning_content:
+            reasoning.append(delta.reasoning_content)
         if delta.tool_calls:
             tool_calls.append(delta.tool_calls)
     content = "".join(full)
     fallback_tool_calls = None if tool_calls.calls or not tools_enabled else parse_tool_calls_text(content)
     message: dict[str, Any] = {"role": "assistant"}
+    reasoning_text = "".join(reasoning)
+    if reasoning_text:
+        message["reasoning_content"] = reasoning_text
     if fallback_tool_calls:
         message["content"] = None
         message["tool_calls"] = fallback_tool_calls
@@ -650,7 +781,7 @@ async def complete_openai_response(req: dict[str, Any], sess: SessionContext) ->
         message["content"] = content
     if tool_calls.calls:
         message["tool_calls"] = tool_calls.snapshot()
-    usage = upstream_usage or estimate_usage(req, content)
+    usage = upstream_usage or estimate_usage(req, reasoning_text + content)
     return {
         "id": completion_id,
         "object": "chat.completion",

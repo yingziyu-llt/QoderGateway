@@ -10,6 +10,7 @@ frontend/node_modules/
 frontend/dist/
 src/qoder2api/static/
 *.db
+.pi/
 
 # scripts 凭据与临时产物（含真实 token/密码，勿提交）
 scripts/qoder_credentials.json

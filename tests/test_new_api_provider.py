@@ -192,6 +192,45 @@ class NewApiProviderContractTests(unittest.TestCase):
         self.assertEqual(response.json()["error"]["type"], "upstream_timeout")
         rotate.assert_not_called()
 
+    def test_stream_cache_usage_is_relayed_and_recorded(self):
+        fake_session = SimpleNamespace(
+            identity=SimpleNamespace(uid="account-1", name="Test Account"),
+            region="global",
+        )
+
+        async def fake_stream(payload, session, usage_state):
+            usage = {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "total_tokens": 128,
+                "prompt_tokens_details": {"cached_tokens": 96},
+            }
+            usage_state.update({"usage": usage, "estimated": False})
+            yield 'data: {"id":"chatcmpl-cache","object":"chat.completion.chunk","created":1,"model":"lite","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n'
+            yield 'data: {"id":"chatcmpl-cache","object":"chat.completion.chunk","created":1,"model":"lite","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":120,"completion_tokens":8,"total_tokens":128,"prompt_tokens_details":{"cached_tokens":96}}}\n\n'
+            yield "data: [DONE]\n\n"
+
+        with patch.object(app_module, "db_load_accounts", return_value={"accounts": [{"uid": "account-1", "enabled": 1}]}), \
+             patch.object(app_module, "get_session", new=AsyncMock(return_value=fake_session)), \
+             patch.object(app_module, "stream_openai_response", new=fake_stream):
+            response = self.client.post(
+                "/v1/chat/completions",
+                headers={**self.auth(), "X-Request-ID": "cache-123"},
+                json={"model": "lite", "messages": [{"role": "user", "content": "hello"}], "stream": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('"cached_tokens":96', response.text)
+        metrics = app_module.get_model_metrics()
+        event = next(item for item in metrics["recent"] if item["request_id"] == "cache-123")
+        self.assertEqual(event["cached_tokens"], 96)
+        self.assertFalse(event["tokens_estimated"])
+        self.assertEqual(metrics["by_model"]["lite"]["cache_hit_rate"], 0.8)
+
+        usage = self.client.get("/ui/api-keys/usage?window_hours=24", headers={"X-Gateway-Token": app_module.load_config().get("gateway_token", "admin")})
+        self.assertEqual(usage.status_code, 200)
+        self.assertEqual(usage.json()["cached_tokens"], 96)
+
 
 if __name__ == "__main__":
     unittest.main()

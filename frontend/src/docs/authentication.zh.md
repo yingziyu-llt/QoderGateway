@@ -28,7 +28,7 @@ OpenAI 兼容接口可以单独开启 Bearer Key 校验。
 Authorization: Bearer <allowed-api-key>
 ```
 
-控制台的 API Key 管理页会按最近 24 小时统计每个 Key 和模型的请求数、输入 token、输出 token 和总 token。统计接口是 `GET /ui/api-keys/usage?window_hours=24`，需要携带管理 Token；请求统计事件只保存 Key 的不可逆指纹，不保存原始 Key。原始 Key 仍保存在鉴权配置中，用于校验客户端请求。
+控制台的 API Key 管理页会按最近 24 小时统计每个 Key 和模型的请求数、输入 token、输出 token、总 token 以及 prompt 缓存命中率。统计接口是 `GET /ui/api-keys/usage?window_hours=24`，需要携带管理 Token；请求统计事件只保存 Key 的不可逆指纹，不保存原始 Key。原始 Key 仍保存在鉴权配置中，用于校验客户端请求。
 
 ## New API Provider 模式
 

@@ -71,4 +71,4 @@ curl http://new-api.example.com/v1/chat/completions \
 
 ## 用量边界
 
-Qoder 上游有时不返回 token usage，QoderGateway 会生成估算值并在内部 telemetry 中标记。New API 的计费和统计应视为内部控制数据，不等同于 Qoder 官方 Credits 或账单。
+Qoder 上游有时不返回 token usage，QoderGateway 会生成估算值并在内部 telemetry 中标记。上游返回 prompt 缓存计数时，QoderGateway 会将其透传为 `prompt_tokens_details.cached_tokens`，New API 可据此统计缓存命中率。New API 的计费和统计应视为内部控制数据，不等同于 Qoder 官方 Credits 或账单。

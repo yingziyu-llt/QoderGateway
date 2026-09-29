@@ -69,6 +69,21 @@ def _safe_record_request(**kwargs: Any) -> None:
         add_log(f"Request telemetry unavailable: {exc}", "WARNING")
 
 
+def _usage_record_fields(usage: Any) -> dict[str, Any]:
+    """Map a normalized usage object onto the telemetry token columns."""
+    if not isinstance(usage, dict):
+        return {}
+    prompt_details = usage.get("prompt_tokens_details")
+    completion_details = usage.get("completion_tokens_details")
+    return {
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "completion_tokens": usage.get("completion_tokens"),
+        "total_tokens": usage.get("total_tokens"),
+        "cached_tokens": prompt_details.get("cached_tokens") if isinstance(prompt_details, dict) else None,
+        "reasoning_tokens": completion_details.get("reasoning_tokens") if isinstance(completion_details, dict) else None,
+    }
+
+
 def _status_code(exc: Exception) -> int | None:
     response = getattr(exc, "response", None)
     return getattr(response, "status_code", None)
@@ -716,9 +731,7 @@ async def chat_completions(
                             status_code=200 if success else _upstream_status(stream_error) if stream_error else None,
                             error=_safe_upstream_detail(stream_error) if stream_error else None,
                             api_key_hash=api_key_hash,
-                            prompt_tokens=(usage_state.get("usage") or {}).get("prompt_tokens"),
-                            completion_tokens=(usage_state.get("usage") or {}).get("completion_tokens"),
-                            total_tokens=(usage_state.get("usage") or {}).get("total_tokens"),
+                            **_usage_record_fields(usage_state.get("usage")),
                             tokens_estimated=bool(usage_state.get("estimated")),
                         )
 
@@ -749,9 +762,7 @@ async def chat_completions(
                     total_ms=(time.perf_counter() - attempt_started) * 1000,
                     status_code=200,
                     api_key_hash=api_key_hash,
-                    prompt_tokens=usage.get("prompt_tokens"),
-                    completion_tokens=usage.get("completion_tokens"),
-                    total_tokens=usage.get("total_tokens"),
+                    **_usage_record_fields(usage),
                     tokens_estimated=estimated,
                 )
                 return JSONResponse(content=resp, headers={"X-Request-ID": request_id})

@@ -24,6 +24,9 @@ interface APIKeyUsageSummary {
   prompt_tokens: number
   completion_tokens: number
   total_tokens: number
+  cached_tokens?: number
+  cache_hit_rate?: number | null
+  cache_token_events?: number
   token_events: number
   estimated_token_events: number
 }
@@ -39,6 +42,7 @@ interface APIKeyUsagePayload {
   prompt_tokens: number
   completion_tokens: number
   total_tokens: number
+  cached_tokens?: number
   keys: APIKeyUsageItem[]
 }
 interface Message { role: 'user' | 'assistant'; content: string }
@@ -52,6 +56,9 @@ interface ModelMetrics {
   avg_total_ms?: number | null
   p95_total_ms?: number | null
   last_used_at?: number | null
+  cached_tokens?: number
+  cache_hit_rate?: number | null
+  cache_token_events?: number
 }
 interface ModelInfo {
   id: string
@@ -72,6 +79,8 @@ interface ModelRecentRequest {
   ttft_ms: number | null
   total_ms: number | null
   error: string | null
+  cached_tokens?: number | null
+  reasoning_tokens?: number | null
 }
 interface ModelsPayload {
   region: string
@@ -139,9 +148,9 @@ const UI_TEXT = {
       serviceStatus: 'Service Status', allGatewaysActive: 'All gateways active', noActiveSession: 'No active session', accountPool: 'Account Pool', activeSessions: 'Active Qoder accounts', apiAuth: 'API Auth', openAccess: 'Open access', activeUser: 'Active User', systemBriefing: 'System Briefing', readyBrief: 'Gateway is running. {count} account(s) are available for routing.', notReadyBrief: 'No active session is available. Import an account or add a PAT first.', recentNotifications: 'Recent Notifications', authImportError: 'Auth Import Error', sessionActive: 'Session Active', credentialConfig: 'Credential Configuration', credentialDesc: 'Add a Qoder PAT or import the current local Qoder auth session.', patPlaceholder: 'Enter Qoder PAT...', addPat: 'Add PAT', saving: 'Saving...', autoImport: 'Auto Import',
     },
     accounts: { desc: 'Manage Qoder accounts used by the gateway for request routing and failover.', refreshStatus: 'Refresh Status', importAccounts: 'Import Accounts', search: 'Search accounts...', empty: 'No accounts imported. Click Import Accounts or add a PAT from Dashboard.', showing: 'Showing {count} account(s)' },
-    models: { desc: 'Inspect the regional model catalog, recent traffic, and real response timings.', refresh: 'Refresh Catalog', catalog: 'Catalog', upstream: 'Upstream', gatewayCatalog: 'Gateway catalog', recent24h: 'Recent 24h', requests: 'Requests', activeAccount: 'Active Account', availableModels: 'Available Models', recentTraffic: 'Recent Traffic', benchmark: 'Benchmark Selected', benchmarkAll: 'Benchmark Top Models', benchmarking: 'Testing...', selectAll: 'Select all', selected: 'selected', model: 'Model', source: 'Source', successRate: 'Success', ttft: 'First token', totalTime: 'Total time', lastUsed: 'Last used', noMetrics: 'No traffic yet', noRecent: 'No recent requests', benchmarkResults: 'Benchmark Results', benchmarkHint: 'Tests use a short real request on the active account and consume a small amount of quota.', testPrompt: 'Test prompt', defaultPrompt: 'Reply with exactly: OK', passed: 'Passed', failed: 'Failed', noAccount: 'Add or activate an account before benchmarking.' },
+    models: { desc: 'Inspect the regional model catalog, recent traffic, and real response timings.', refresh: 'Refresh Catalog', catalog: 'Catalog', upstream: 'Upstream', gatewayCatalog: 'Gateway catalog', recent24h: 'Recent 24h', requests: 'Requests', activeAccount: 'Active Account', availableModels: 'Available Models', recentTraffic: 'Recent Traffic', benchmark: 'Benchmark Selected', benchmarkAll: 'Benchmark Top Models', benchmarking: 'Testing...', selectAll: 'Select all', selected: 'selected', model: 'Model', source: 'Source', successRate: 'Success', cacheHitRate: 'Cache hit', ttft: 'First token', totalTime: 'Total time', lastUsed: 'Last used', noMetrics: 'No traffic yet', noRecent: 'No recent requests', benchmarkResults: 'Benchmark Results', benchmarkHint: 'Tests use a short real request on the active account and consume a small amount of quota.', testPrompt: 'Test prompt', defaultPrompt: 'Reply with exactly: OK', passed: 'Passed', failed: 'Failed', noAccount: 'Add or activate an account before benchmarking.' },
     playground: { modelConfig: 'Model Configuration', streamResponse: 'Stream Response', systemPrompt: 'System Prompt', systemPromptPlaceholder: "Define the AI's persona...", ask: 'Ask anything...', send: 'Send', waiting: 'Waiting for response...' },
-    api: { generate: 'Generate New Key', desc: 'Manage authentication keys and gateway access permissions for client requests.', gatewayAuth: 'Gateway Authentication', gatewayAuthDesc: 'Toggle API key validation for incoming /v1 requests.', systemStatus: 'System Status', activeKeys: 'Active Keys', configured: 'configured', activeAccessKeys: 'Active Access Keys', keyPlaceholder: 'Enter or paste a key...', noKeys: 'No API keys configured. Generate one above.', usageTitle: 'API Key Usage', usageDesc: 'Recent 24-hour request and token usage grouped by API key and model.', usageRefresh: 'Refresh Usage', usageKey: 'API Key', usageModel: 'Model', usageRequests: 'Requests', inputTokens: 'Input tokens', outputTokens: 'Output tokens', totalTokens: 'Total tokens', estimated: 'estimated', noUsage: 'No API key traffic recorded yet', anonymous: 'Anonymous', bestPractices: 'Security Best Practices', bestPracticesDesc: 'Do not expose API keys in client-side code. Rotate keys when they appear in logs, screenshots, or shared scripts.', securityPolicy: 'Security Policy' },
+    api: { generate: 'Generate New Key', desc: 'Manage authentication keys and gateway access permissions for client requests.', gatewayAuth: 'Gateway Authentication', gatewayAuthDesc: 'Toggle API key validation for incoming /v1 requests.', systemStatus: 'System Status', activeKeys: 'Active Keys', configured: 'configured', activeAccessKeys: 'Active Access Keys', keyPlaceholder: 'Enter or paste a key...', noKeys: 'No API keys configured. Generate one above.', usageTitle: 'API Key Usage', usageDesc: 'Recent 24-hour request, token, and prompt-cache usage grouped by API key and model.', usageRefresh: 'Refresh Usage', usageKey: 'API Key', usageModel: 'Model', usageRequests: 'Requests', inputTokens: 'Input tokens', outputTokens: 'Output tokens', totalTokens: 'Total tokens', cacheHitRate: 'Cache hit rate', cachedTokens: 'cached', estimated: 'estimated', noUsage: 'No API key traffic recorded yet', anonymous: 'Anonymous', bestPractices: 'Security Best Practices', bestPracticesDesc: 'Do not expose API keys in client-side code. Rotate keys when they appear in logs, screenshots, or shared scripts.', securityPolicy: 'Security Policy' },
     logs: { account: 'Account', status: 'Status', range: 'Range', allAccounts: 'All Accounts', allStatuses: 'All Statuses', last24h: 'Last 24h', lastHour: 'Last hour', last7d: 'Last 7 days', noLogs: 'No logs available', noMatch: 'No logs match current filters', timestamp: 'Timestamp', level: 'Level', message: 'Message' },
     register: {
       desc: 'Register multiple Qoder accounts in parallel, pull device credentials and auto-save them into the pool. Browsers stay hidden in the background; each task pops to top once for human verification, then hides again — finish one, next takes its turn.',
@@ -188,9 +197,9 @@ const UI_TEXT = {
       serviceStatus: '服务状态', allGatewaysActive: '网关可用', noActiveSession: '没有可用账号', accountPool: '账号池', activeSessions: '可参与路由的 Qoder 账号', apiAuth: 'API 鉴权', openAccess: '未开启鉴权', activeUser: '当前账号', systemBriefing: '运行状态', readyBrief: '网关正在运行，当前有 {count} 个账号可用于请求路由。', notReadyBrief: '当前没有可用会话，请先导入账号或添加 PAT。', recentNotifications: '最近状态', authImportError: '本地登录导入失败', sessionActive: '账号已连接', credentialConfig: '凭据配置', credentialDesc: '添加 Qoder PAT，或导入本机已有的 Qoder 登录会话。', patPlaceholder: '输入 Qoder PAT...', addPat: '添加 PAT', saving: '保存中...', autoImport: '自动导入',
     },
     accounts: { desc: '管理网关用于请求路由和失败切换的 Qoder 账号。', refreshStatus: '刷新状态', importAccounts: '导入账号', search: '搜索账号...', empty: '还没有导入账号。点击导入账号，或在控制台添加 PAT。', showing: '共 {count} 个账号' },
-    models: { desc: '查看当前区域模型目录、近期访问情况和真实响应耗时。', refresh: '刷新目录', catalog: '目录来源', upstream: '上游目录', gatewayCatalog: '网关目录', recent24h: '最近 24 小时', requests: '请求数', activeAccount: '当前账号', availableModels: '可用模型', recentTraffic: '近期访问', benchmark: '测试选中模型', benchmarkAll: '测试常用模型', benchmarking: '测试中...', selectAll: '全选', selected: '已选', model: '模型', source: '来源', successRate: '成功率', ttft: '首字节', totalTime: '总耗时', lastUsed: '最近使用', noMetrics: '暂无访问', noRecent: '暂无近期请求', benchmarkResults: '测速结果', benchmarkHint: '测速会使用当前账号发起一个很短的真实请求，会消耗少量额度。', testPrompt: '测试提示词', defaultPrompt: '只回复：OK', passed: '成功', failed: '失败', noAccount: '请先添加并激活一个账号，再开始测速。' },
+    models: { desc: '查看当前区域模型目录、近期访问情况和真实响应耗时。', refresh: '刷新目录', catalog: '目录来源', upstream: '上游目录', gatewayCatalog: '网关目录', recent24h: '最近 24 小时', requests: '请求数', activeAccount: '当前账号', availableModels: '可用模型', recentTraffic: '近期访问', benchmark: '测试选中模型', benchmarkAll: '测试常用模型', benchmarking: '测试中...', selectAll: '全选', selected: '已选', model: '模型', source: '来源', successRate: '成功率', cacheHitRate: '缓存命中', ttft: '首字节', totalTime: '总耗时', lastUsed: '最近使用', noMetrics: '暂无访问', noRecent: '暂无近期请求', benchmarkResults: '测速结果', benchmarkHint: '测速会使用当前账号发起一个很短的真实请求，会消耗少量额度。', testPrompt: '测试提示词', defaultPrompt: '只回复：OK', passed: '成功', failed: '失败', noAccount: '请先添加并激活一个账号，再开始测速。' },
     playground: { modelConfig: '模型配置', streamResponse: '流式响应', systemPrompt: '系统提示词', systemPromptPlaceholder: '定义模型的角色或行为...', ask: '输入要发送的内容...', send: '发送', waiting: '正在等待响应...' },
-    api: { generate: '生成新 Key', desc: '管理客户端请求网关时使用的 API Key 和访问权限。', gatewayAuth: '网关 API 鉴权', gatewayAuthDesc: '控制 /v1 请求是否必须携带 API Key。', systemStatus: '系统状态', activeKeys: '可用 Key', configured: '已配置', activeAccessKeys: '已启用的 API Key', keyPlaceholder: '输入或粘贴 API Key...', noKeys: '还没有配置 API Key。请先生成并添加。', usageTitle: 'API Key 用量', usageDesc: '按 API Key 和模型统计最近 24 小时的请求与 token 用量。', usageRefresh: '刷新用量', usageKey: 'API Key', usageModel: '模型', usageRequests: '请求数', inputTokens: '输入 token', outputTokens: '输出 token', totalTokens: '总 token', estimated: '估算', noUsage: '还没有记录到 API Key 流量', anonymous: '未携带 Key', bestPractices: '安全建议', bestPracticesDesc: '不要把 API Key 写在前端代码里。如果 Key 出现在日志、截图或共享脚本中，请及时删除并重新生成。', securityPolicy: '安全策略' },
+    api: { generate: '生成新 Key', desc: '管理客户端请求网关时使用的 API Key 和访问权限。', gatewayAuth: '网关 API 鉴权', gatewayAuthDesc: '控制 /v1 请求是否必须携带 API Key。', systemStatus: '系统状态', activeKeys: '可用 Key', configured: '已配置', activeAccessKeys: '已启用的 API Key', keyPlaceholder: '输入或粘贴 API Key...', noKeys: '还没有配置 API Key。请先生成并添加。', usageTitle: 'API Key 用量', usageDesc: '按 API Key 和模型统计最近 24 小时的请求、token 与缓存命中情况。', usageRefresh: '刷新用量', usageKey: 'API Key', usageModel: '模型', usageRequests: '请求数', inputTokens: '输入 token', outputTokens: '输出 token', totalTokens: '总 token', cacheHitRate: '缓存命中率', cachedTokens: '已缓存', estimated: '估算', noUsage: '还没有记录到 API Key 流量', anonymous: '未携带 Key', bestPractices: '安全建议', bestPracticesDesc: '不要把 API Key 写在前端代码里。如果 Key 出现在日志、截图或共享脚本中，请及时删除并重新生成。', securityPolicy: '安全策略' },
     logs: { account: '账号', status: '级别', range: '时间范围', allAccounts: '全部账号', allStatuses: '全部级别', last24h: '最近 24 小时', lastHour: '最近 1 小时', last7d: '最近 7 天', noLogs: '暂无日志', noMatch: '没有匹配当前筛选条件的日志', timestamp: '时间', level: '级别', message: '内容' },
     register: {
       desc: '并行注册多个 Qoder 账号并拉取 Device 凭据，成功后自动入库。浏览器平时隐藏后台，人机验证时置顶显示，划完一个自动轮到下一个。',
@@ -467,13 +476,13 @@ function ModelsPage({
         <div className="overflow-x-auto">
           <table className="w-full text-left min-w-[860px]">
             <thead className="bg-canvas-soft border-b border-hairline">
-              <tr>{['', t.models.model, t.models.source, t.models.requests, t.models.successRate, t.models.ttft, t.models.totalTime, t.models.lastUsed].map((heading, index) => <th key={index} className="px-6 py-4 text-[10px] font-semibold text-body uppercase tracking-widest">{heading}</th>)}</tr>
+              <tr>{['', t.models.model, t.models.source, t.models.requests, t.models.successRate, t.models.cacheHitRate, t.models.ttft, t.models.totalTime, t.models.lastUsed].map((heading, index) => <th key={index} className="px-6 py-4 text-[10px] font-semibold text-body uppercase tracking-widest">{heading}</th>)}</tr>
             </thead>
             <tbody className="divide-y divide-hairline">
               {loading ? (
-                <tr><td colSpan={8} className="py-12 text-center text-sm text-body">{lang === 'zh' ? '正在读取模型目录...' : 'Loading model catalog...'}</td></tr>
+                <tr><td colSpan={9} className="py-12 text-center text-sm text-body">{lang === 'zh' ? '正在读取模型目录...' : 'Loading model catalog...'}</td></tr>
               ) : sortedModels.length === 0 ? (
-                <tr><td colSpan={8} className="py-12 text-center text-sm text-body">{t.models.noMetrics}</td></tr>
+                <tr><td colSpan={9} className="py-12 text-center text-sm text-body">{t.models.noMetrics}</td></tr>
               ) : sortedModels.map(modelInfo => {
                 const metric = modelInfo.metrics || {}
                 return (
@@ -483,6 +492,7 @@ function ModelsPage({
                     <td className="px-6 py-4"><span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${modelInfo.source === 'upstream' ? 'bg-mint/30 text-ink' : 'bg-sky/20 text-ink'}`}>{modelInfo.source === 'upstream' ? t.models.upstream : t.models.gatewayCatalog}</span></td>
                     <td className="px-6 py-4 text-sm font-mono text-body">{metric.requests || 0}</td>
                     <td className="px-6 py-4 text-sm font-mono text-body">{formatRate(metric.success_rate)}</td>
+                    <td className="px-6 py-4 text-sm font-mono text-body">{formatRate(metric.cache_hit_rate)}</td>
                     <td className="px-6 py-4 text-sm font-mono text-body">{formatMs(metric.avg_ttft_ms)}</td>
                     <td className="px-6 py-4 text-sm font-mono text-body">{formatMs(metric.avg_total_ms)}</td>
                     <td className="px-6 py-4 text-xs font-mono text-body">{formatTime(metric.last_used_at)}</td>
@@ -1085,6 +1095,13 @@ export default function App() {
       ? entries.map(([model, summary]) => ({ key, model, summary }))
       : [{ key, model: '--', summary: key }]
   })
+  const usageCacheRate = (() => {
+    const covered = (apiKeyUsage?.keys || []).filter(key => (key.cache_token_events || 0) > 0)
+    if (covered.length === 0) return null
+    const cached = covered.reduce((sum, key) => sum + (key.cached_tokens || 0), 0)
+    const prompt = covered.reduce((sum, key) => sum + (key.prompt_tokens || 0), 0)
+    return prompt > 0 ? cached / prompt : null
+  })()
   // ─── LOGIN PAGE ───
   if (!token) {
     return (
@@ -1512,7 +1529,7 @@ export default function App() {
                     <span className="material-symbols-outlined text-[18px]">refresh</span>{t.api.usageRefresh}
                   </button>
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-3 border-b border-hairline">
+                <div className="grid grid-cols-1 sm:grid-cols-4 border-b border-hairline">
                   <div className="p-5 sm:border-r border-hairline">
                     <div className="text-[10px] font-bold text-body uppercase tracking-widest">{t.api.usageRequests}</div>
                     <div className="mt-2 text-2xl font-display-sm text-ink">{formatUsageTokens(apiKeyUsage?.total_requests)}</div>
@@ -1520,6 +1537,10 @@ export default function App() {
                   <div className="p-5 sm:border-r border-hairline">
                     <div className="text-[10px] font-bold text-body uppercase tracking-widest">{t.api.inputTokens}</div>
                     <div className="mt-2 text-2xl font-display-sm text-ink">{formatUsageTokens(apiKeyUsage?.prompt_tokens)}</div>
+                  </div>
+                  <div className="p-5 sm:border-r border-hairline">
+                    <div className="text-[10px] font-bold text-body uppercase tracking-widest">{t.api.cacheHitRate}</div>
+                    <div className="mt-2 text-2xl font-display-sm text-ink">{formatRate(usageCacheRate)}</div>
                   </div>
                   <div className="p-5">
                     <div className="text-[10px] font-bold text-body uppercase tracking-widest">{t.api.totalTokens}</div>
@@ -1530,14 +1551,14 @@ export default function App() {
                   <table className="w-full text-left min-w-[760px]">
                     <thead className="bg-canvas-soft/50 border-b border-hairline">
                       <tr>
-                        {[t.api.usageKey, t.api.usageModel, t.api.usageRequests, t.api.inputTokens, t.api.outputTokens, t.api.totalTokens].map(header => (
+                        {[t.api.usageKey, t.api.usageModel, t.api.usageRequests, t.api.inputTokens, t.api.cacheHitRate, t.api.outputTokens, t.api.totalTokens].map(header => (
                           <th key={header} className="px-6 py-4 text-[10px] font-semibold text-body uppercase tracking-widest">{header}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-hairline">
                       {apiKeyUsageRows.length === 0 ? (
-                        <tr><td colSpan={6} className="py-8 text-center text-xs text-body font-medium">{t.api.noUsage}</td></tr>
+                        <tr><td colSpan={7} className="py-8 text-center text-xs text-body font-medium">{t.api.noUsage}</td></tr>
                       ) : apiKeyUsageRows.map(({ key, model: usageModel, summary }) => (
                         <tr key={`${key.fingerprint}:${usageModel}`} className="hover:bg-canvas-soft/30 transition-colors">
                           <td className="px-6 py-4">
@@ -1547,6 +1568,10 @@ export default function App() {
                           <td className="px-6 py-4 font-mono text-xs text-body">{usageModel}</td>
                           <td className="px-6 py-4 text-sm font-semibold text-ink">{formatUsageTokens(summary.requests)}</td>
                           <td className="px-6 py-4 text-sm text-body">{formatUsageTokens(summary.prompt_tokens)}</td>
+                          <td className="px-6 py-4 text-sm text-body">
+                            <div>{formatRate(summary.cache_hit_rate)}</div>
+                            {(summary.cache_token_events || 0) > 0 && <div className="text-[10px] text-body/70 mt-1">{formatUsageTokens(summary.cached_tokens)} {t.api.cachedTokens}</div>}
+                          </td>
                           <td className="px-6 py-4 text-sm text-body">{formatUsageTokens(summary.completion_tokens)}</td>
                           <td className="px-6 py-4">
                             <div className="text-sm font-semibold text-ink">{formatUsageTokens(summary.total_tokens)}</div>

@@ -83,6 +83,22 @@
 - `tools`、`stop`、`max_tokens`、`temperature`、`reasoning_effort`、`patches`、`custom_model` 均可选传入。
 - 401/403 时客户端会 `forceRefreshToken`（用 drt- 刷新）后重试一次。
 
+### usage / prompt cache 结构（2026-09 网关侧实测）
+
+同协议的 usage 可能出现在多个位置，网关 `normalize_usage()`（`src/qoder2api/bridge.py`）会合并 `usage`、`raw_usage`、`rawUsage`、`response_meta` 后归一化：
+
+| 上游形态 | 示例字段 | 归一化结果 |
+| --- | --- | --- |
+| OpenAI / Qoder 新版 | `prompt_tokens_details.cached_tokens` | `prompt_tokens_details.cached_tokens` |
+| `usage` 简版 + `raw_usage` 详版 | 简版无 details，`raw_usage` 带 `cached_tokens` | 合并后保留详情 |
+| DeepSeek 风格 | `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` | 追加映射到 `cached_tokens`，原始字段保留 |
+| Anthropic 风格 | `cache_read_input_tokens` / `cache_creation_input_tokens` | `cached_tokens`，且 `prompt_tokens` 补齐为 input+cache |
+| 老版信封 | `body.response_meta.usage` | 递归解析后同样归一化 |
+
+缓存命中率统一定义为 `prompt_tokens_details.cached_tokens / prompt_tokens`。老版 CN 路径实测会返回真实 usage（`tokens_estimated=false`）；若上游不返回 usage，网关用估算值补齐并写入 `cached_tokens=0`，telemetry 以 `tokens_estimated` 标记。
+
+直连复现脚本：`scripts/probe_cache_usage.py`（需要有效账号，会分别请求区域老版与新版端点并 dump 含 usage/cache 的原始 SSE 行）。
+
 ### 域名映射（国际版，国内为 `.com.cn`）
 
 ```js
@@ -102,6 +118,24 @@ sse/chat  : api3.qoder.sh         (老版 agent_chat_generation，QoderGateway �
 - 请求头：`cosy-machinetoken`、`cosy-machinetype`、`cosy-machineid`、`login-version: v2`、`cosy-version: 0.1.43`、`cosy-clienttype: 5`、UA `Go-http-client/2.0`。
 - chat：`POST https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`，`Authorization: Bearer COSY.<payloadB64>.<md5sig>`，body 为 `template_base()`（`src/qoder2api/bridge.py`）。
 - 实测：**`dt-` 前缀的 security_oauth_token 在老版端点上同样有效**（用 QoderGateway 现有代码构造 `AuthIdentity` 直接成功）。
+
+### CN 网关消息格式（2026-09 实测，Kimi K3 工具调用复现）
+
+CN 端点（`gateway.qoder.com.cn/.../agent_chat_generation`）期望的是 Qoder 客户端**原生消息格式**，不是 OpenAI 原始消息：
+
+- 用户消息：`{"role":"user","content":"","contents":[{"type":"text","text":"..."}],"response_meta":<usage>,"reasoning_content_signature":""}`
+- 助手消息：`content` 必为字符串，同时带 `response_meta` 与 `reasoning_content_signature`；携带 `tool_calls` 时 `content` 必须是 `""`，**不能是 `null`**。
+- 工具结果：`{"role":"tool","content":"...","name":"...","tool_call_id":"...","response_meta":<usage>,"reasoning_content_signature":""}`
+
+实测矩阵（同一段“user → assistant(tool_calls) → tool result”对话，经 CN 网关）：
+
+| 消息形态 | 上游结果 |
+| --- | --- |
+| 原始 OpenAI 透传，assistant `content: null` | **空补全**：`completion_tokens=0`、无 reasoning/content、立即 `finish_reason=stop` |
+| 仅把 assistant `content` 改成 `""`（其余原始）| 正常回答 |
+| 完整原生格式（上表三种消息）| 正常回答（reasoning + content 均正常） |
+
+因此 `build_cn_qoder_body()` 会把入站 OpenAI 消息统一经 `convert_incoming_message()` 转换后再编码；转换后工具链（第一轮原生 tool_calls → 第二轮工具结果）已验证可用，消息中任何 `content: null` 都会被归一为字符串。
 
 ---
 

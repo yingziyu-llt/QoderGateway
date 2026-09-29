@@ -28,7 +28,7 @@ When enabled, clients must send:
 Authorization: Bearer <allowed-api-key>
 ```
 
-The API key page reports the last 24 hours of requests, input tokens, output tokens, and total tokens grouped by key and model. The management endpoint is `GET /ui/api-keys/usage?window_hours=24` and requires the management token. Request telemetry stores only a non-reversible key fingerprint, never the raw key; the raw key remains in the authentication configuration so incoming requests can be validated.
+The API key page reports the last 24 hours of requests, input tokens, output tokens, total tokens, and prompt-cache hit rate grouped by key and model. The management endpoint is `GET /ui/api-keys/usage?window_hours=24` and requires the management token. Request telemetry stores only a non-reversible key fingerprint, never the raw key; the raw key remains in the authentication configuration so incoming requests can be validated.
 
 ## New API Provider Mode
 

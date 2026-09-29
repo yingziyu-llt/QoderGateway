@@ -116,6 +116,8 @@ def init_db():
                     prompt_tokens INTEGER,
                     completion_tokens INTEGER,
                     total_tokens INTEGER,
+                    cached_tokens INTEGER,
+                    reasoning_tokens INTEGER,
                     tokens_estimated INTEGER NOT NULL DEFAULT 0
                 )
                 """
@@ -126,6 +128,8 @@ def init_db():
                 ("prompt_tokens", "INTEGER"),
                 ("completion_tokens", "INTEGER"),
                 ("total_tokens", "INTEGER"),
+                ("cached_tokens", "INTEGER"),
+                ("reasoning_tokens", "INTEGER"),
                 ("tokens_estimated", "INTEGER NOT NULL DEFAULT 0"),
             ):
                 try:
