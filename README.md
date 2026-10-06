@@ -79,6 +79,8 @@ QODER_PAT=pt-...
 
 中国区 PAT 在 `qoder.com.cn/account/integrations` 获取；国际区 PAT 在 `qoder.com/account/integrations` 获取。`dt-`、`drt-`、`jt-`、`jrt-` 是登录态或 job token，不是可直接提交到 **Add PAT** 的 PAT。
 
+> **关于 token 过期**：`jt-`/`jrt-` 这类 session token 会过期。网关会记住你导入的 PAT，并在 token 临近过期时自动重新兑换；只要 PAT 本身有效，账号就不会失效。因此推荐用 **Add PAT** 导入，而不是仅依赖 Auto Import。
+
 > **默认密码是 `admin`，强烈建议第一次登录后立即修改。**
 
 ### 启动 / Start

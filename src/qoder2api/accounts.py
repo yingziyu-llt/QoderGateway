@@ -5,9 +5,11 @@ from typing import Any
 from .auth import (
     AuthIdentity,
     SessionContext,
+    is_pat,
     load_local_session,
     new_session,
     new_machine,
+    normalize_pat,
     fetch_user_status
 )
 from .database import get_db
@@ -37,6 +39,7 @@ def db_load_accounts() -> dict[str, Any]:
             account.pop("security_oauth_token", None)
             account.pop("refresh_token", None)
             account.pop("machine_id", None)
+            account.pop("personal_access_token", None)
             accounts.append(account)
         active_uid = db_get_settings("active_uid")
         return {"accounts": accounts, "active_uid": active_uid}
@@ -83,13 +86,14 @@ async def import_current_auth() -> dict[str, Any]:
             INSERT OR REPLACE INTO accounts (
                 uid, name, user_type, security_oauth_token, refresh_token, machine_id,
                 enabled, last_status, last_error, quota, is_quota_exceeded, plan,
-                user_tag, next_reset_at, region
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                user_tag, next_reset_at, region, token_expires_at, personal_access_token
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 uid, name, sess.identity.user_type, sess.identity.security_oauth_token,
                 sess.identity.refresh_token, sess.machine_id, enabled, "ok", None,
-                quota_val, is_exceeded, plan_val, user_tag_val, next_reset, sess.region
+                quota_val, is_exceeded, plan_val, user_tag_val, next_reset, sess.region,
+                sess.identity.expires_at or None, sess.identity.personal_access_token or None,
             )
         )
 
@@ -116,29 +120,42 @@ async def import_current_auth() -> dict[str, Any]:
 def batch_import_accounts(records: list[dict]) -> dict:
     """批量导入账号（来自注册机导出的 JSON）。
 
-    每条记录字段：email/password/name/user_id/token/refresh_token/expires_at/...
-    返回 {"imported": n, "skipped": m}。
+    每条记录字段：email/password/name/user_id/uid/token/refresh_token/region/...
+    支持两种 token 形态：
+
+    - `pat` / `personal_access_token`：PAT，可无限续期，会一并落库；
+    - `token` / `security_oauth_token`：已经是 job/device token（注册机导出形态），
+      配合 `refresh_token` 刷新。
     """
     imported = 0
     skipped = 0
     with get_db() as conn:
         for rec in records:
-            uid = str(rec.get("user_id") or "").strip()
-            token = str(rec.get("token") or rec.get("security_oauth_token") or "").strip()
-            if not uid and not token:
+            token = normalize_pat(
+                rec.get("token") or rec.get("security_oauth_token") or ""
+            )
+            pat = normalize_pat(
+                rec.get("pat") or rec.get("personal_access_token") or ""
+            )
+            if not token and is_pat(rec.get("pat") or rec.get("token")):
+                # 只给了 PAT（还没换 token）时，先记录 PAT，由刷新线程补出 token。
+                pat = pat or normalize_pat(rec.get("token"))
+            uid = str(rec.get("user_id") or rec.get("uid") or "").strip()
+            if not uid and not token and not pat:
                 skipped += 1
                 continue
             if not uid:
-                # 无 user_id 时用 token 前 12 位兜底主键
-                uid = "tok_" + token[:24]
+                # 无 user_id 时用 token/PAT 前 24 位兜底主键
+                uid = "tok_" + (token or pat)[:24]
             existing = conn.execute("SELECT enabled FROM accounts WHERE uid = ?", (uid,)).fetchone()
             enabled = existing[0] if existing else 1
             conn.execute(
                 """
                 INSERT OR REPLACE INTO accounts (
                     uid, name, user_type, security_oauth_token, refresh_token, machine_id,
-                    enabled, last_status, last_error, quota, is_quota_exceeded, plan, user_tag, next_reset_at, token_expires_at, region
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ok', NULL, 0, 0, 'PLAN_TIER_PRO_TRIAL', 'Pro Trial', NULL, ?, ?)
+                    enabled, last_status, last_error, quota, is_quota_exceeded, plan, user_tag,
+                    next_reset_at, token_expires_at, region, personal_access_token
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ok', NULL, 0, 0, 'PLAN_TIER_PRO_TRIAL', 'Pro Trial', NULL, ?, ?, ?)
                 """,
                 (
                     uid,
@@ -146,17 +163,24 @@ def batch_import_accounts(records: list[dict]) -> dict:
                     "personal_standard",
                     token,
                     str(rec.get("refresh_token") or ""),
-                    str(uuid.uuid4()),
+                    str(rec.get("machine_id") or uuid.uuid4()),
                     enabled,
                     str(rec.get("expires_at") or ""),
                     normalize_region(rec.get("region") or configured_region()),
+                    pat or None,
                 ),
             )
             imported += 1
-        if not db_get_settings("active_uid"):
-            active = conn.execute("SELECT uid FROM accounts WHERE enabled = 1 LIMIT 1").fetchone()
-            if active:
-                db_set_settings("active_uid", active["uid"])
+        # Use the same connection: a nested `get_db()` write here would deadlock
+        # against the transaction this block is already holding.
+        active = conn.execute("SELECT value FROM settings WHERE key = 'active_uid'").fetchone()
+        if not active:
+            first = conn.execute("SELECT uid FROM accounts WHERE enabled = 1 LIMIT 1").fetchone()
+            if first:
+                conn.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES ('active_uid', ?)",
+                    (first["uid"],),
+                )
     return {"imported": imported, "skipped": skipped}
 
 
@@ -190,7 +214,9 @@ def get_active_session() -> SessionContext:
         organization_name="",
         user_type=account["user_type"],
         security_oauth_token=account["security_oauth_token"],
-        refresh_token=account["refresh_token"]
+        refresh_token=account["refresh_token"],
+        personal_access_token=normalize_pat(account.get("personal_access_token")),
+        expires_at=str(account.get("token_expires_at") or ""),
     )
     
     region = normalize_region(account.get("region"))
@@ -238,7 +264,9 @@ def rotate_next_account(failed_uid: str, error_msg: str) -> SessionContext:
         organization_name="",
         user_type=next_acc["user_type"],
         security_oauth_token=next_acc["security_oauth_token"],
-        refresh_token=next_acc["refresh_token"]
+        refresh_token=next_acc["refresh_token"],
+        personal_access_token=normalize_pat(next_acc.get("personal_access_token")),
+        expires_at=str(next_acc.get("token_expires_at") or ""),
     )
     region = normalize_region(next_acc.get("region"))
     _, machine_token, machine_type = new_machine(region)

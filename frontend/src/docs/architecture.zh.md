@@ -21,7 +21,9 @@ QoderGate 把 OpenAI 兼容客户端请求桥接到 Qoder 会话。
 | --- | --- |
 | `app.py` | FastAPI 路由、UI 鉴权、请求路由。 |
 | `accounts.py` | SQLite 账号 CRUD 和活跃会话选择。 |
-| `auth.py` | PAT 交换、本地 auth 导入、额度查询。 |
+| `auth.py` | PAT 交换、本地 auth 导入、区域协议常量。 |
+| `tokens.py` | Token 自动刷新（PAT 兑换 / refresh_token）与限额查询。 |
+| `regions.py` | 区域端点（global/cn）与 COSY 版本。 |
 | `bridge.py` | OpenAI 兼容流式和非流式响应转换。 |
 | `signature.py` | Bearer 签名实现。 |
 | `database.py` | SQLite schema 和连接帮助函数。 |

@@ -27,6 +27,32 @@ XcW+ML9FoCI6AOvOzwIDAQAB
 -----END PUBLIC KEY-----"""
 
 
+# Qoder PAT prefixes. ``pt-`` is the personal access token handed to users in
+# the web UI (its internal name is ``personal_token``).
+PAT_PREFIXES = ("pt-",)
+# Session/job token prefixes. These are *not* PATs and cannot be exchanged again.
+SESSION_TOKEN_PREFIXES = ("dt-", "drt-", "jt-", "jrt-")
+
+
+def normalize_pat(value: str | None) -> str:
+    """Strip any ``pat|<pat>`` wrapper a stored credential may carry."""
+    token = (value or "").strip()
+    if token.startswith("pat|"):
+        parts = token.split("|", 2)
+        token = parts[1].strip() if len(parts) > 1 else ""
+    return token
+
+
+def is_pat(value: str | None) -> bool:
+    """True when the value looks like a Qoder Personal Access Token."""
+    return normalize_pat(value).startswith(PAT_PREFIXES)
+
+
+def is_session_token(value: str | None) -> bool:
+    """True when the value is a login/job token rather than a PAT."""
+    return (value or "").strip().startswith(SESSION_TOKEN_PREFIXES)
+
+
 @dataclass(frozen=True)
 class AuthIdentity:
     name: str
@@ -39,6 +65,8 @@ class AuthIdentity:
     security_oauth_token: str
     refresh_token: str
     email: str = ""
+    personal_access_token: str = ""
+    expires_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -225,17 +253,13 @@ async def _exchange_job_token_modern(personal_token: str, region: str) -> dict[s
     }
 
 
-async def exchange_job_token(
+async def _exchange_job_token_legacy(
     personal_token: str,
     machine_id: str,
     machine_token: str,
     machine_type: str,
-    region: str | None = None,
 ) -> dict[str, Any]:
-    region_name = normalize_region(region)
-    if region_name == "cn":
-        return await _exchange_job_token_modern(personal_token, region_name)
-
+    """International legacy COSY/Encode exchange (``center.qoder.sh``)."""
     inner = {
         "personalToken": personal_token,
         "securityOauthToken": "",
@@ -268,30 +292,69 @@ async def exchange_job_token(
     return response.json()
 
 
+async def exchange_job_token(
+    personal_token: str,
+    machine_id: str,
+    machine_token: str,
+    machine_type: str,
+    region: str | None = None,
+) -> dict[str, Any]:
+    region_name = normalize_region(region)
+    if region_name == "cn":
+        return await _exchange_job_token_modern(personal_token, region_name)
+    return await _exchange_job_token_legacy(personal_token, machine_id, machine_token, machine_type)
+
+
+def _credential_from_exchange(data: dict[str, Any], pat: str) -> AuthIdentity:
+    """Normalize either exchange response shape into an :class:`AuthIdentity`.
+
+    The CN OpenAPI returns ``{token, refresh_token, expires_at, user_id, ...}``
+    while the international legacy endpoint returns ``securityOauthToken`` /
+    ``refreshToken`` (and, on newer builds, ``token`` / ``refresh_token``).
+    """
+    access = str(
+        data.get("securityOauthToken")
+        or data.get("token")
+        or data.get("device_token")
+        or data.get("access_token")
+        or ""
+    ).strip()
+    refresh = str(data.get("refreshToken") or data.get("refresh_token") or "").strip()
+    uid = str(data.get("id") or data.get("user_id") or data.get("uid") or "").strip()
+    expires_at = data.get("expires_at") or data.get("expiresAt") or ""
+    return AuthIdentity(
+        name=str(data.get("name") or data.get("user_name") or data.get("username") or ""),
+        aid=uid,
+        uid=uid,
+        yx_uid="",
+        organization_id="",
+        organization_name="",
+        user_type=str(data.get("userType") or data.get("user_type") or "personal_standard"),
+        security_oauth_token=access,
+        refresh_token=refresh,
+        email=str(data.get("email") or ""),
+        personal_access_token=pat,
+        expires_at=str(expires_at),
+    )
+
+
 async def create_session(personal_token: str, region: str | None = None) -> SessionContext:
     region_name = normalize_region(region or configured_region())
-    personal_token = personal_token.strip()
-    if personal_token.startswith("pat|"):
-        personal_token = personal_token.split("|", 2)[1]
-    if personal_token.startswith(("dt-", "drt-", "jt-", "jrt-")):
+    personal_token = normalize_pat(personal_token)
+    if not personal_token:
+        raise ValueError("PAT is required")
+    if is_session_token(personal_token):
         raise ValueError(
             "This is a Qoder session/job token, not a PAT. Use the pt- Personal Access Token, "
             "or use Auto Import for the local Qoder session."
         )
     machine_id, machine_token, machine_type = new_machine(region_name)
     data = await exchange_job_token(personal_token, machine_id, machine_token, machine_type, region_name)
-    identity = AuthIdentity(
-        name=data.get("name", ""),
-        aid=data.get("id", ""),
-        uid=data.get("id", ""),
-        yx_uid="",
-        organization_id="",
-        organization_name="",
-        user_type=data.get("userType", "personal_standard"),
-        security_oauth_token=data.get("securityOauthToken", ""),
-        refresh_token=data.get("refreshToken", ""),
-        email=data.get("email", ""),
-    )
+    identity = _credential_from_exchange(data, personal_token)
+    if not identity.uid:
+        raise RuntimeError(f"jobToken exchange did not return a user id: {str(data)[:200]}")
+    if not identity.security_oauth_token:
+        raise RuntimeError(f"jobToken exchange did not return a token: {str(data)[:200]}")
     return new_session(identity, machine_id, machine_token, machine_type, region_name)
 
 
@@ -331,6 +394,10 @@ def load_local_session(region: str | None = None) -> SessionContext:
         user_type=data.get("userType") or data.get("user_type") or "personal_standard",
         security_oauth_token=data.get("securityOauthToken") or data.get("security_oauth_token") or "",
         refresh_token=data.get("refreshToken") or data.get("refresh_token") or "",
+        personal_access_token=normalize_pat(
+            data.get("personal_access_token") or data.get("personalAccessToken") or ""
+        ),
+        expires_at=str(data.get("expires_at") or data.get("expire_time") or ""),
     )
     
     _, machine_token, machine_type = new_machine(region_name)
@@ -372,11 +439,7 @@ async def fetch_user_status(
         "user-agent": "Go-http-client/2.0",
     }
     async with httpx.AsyncClient(timeout=15, **httpx_client_kwargs()) as client:
-        response = await client.post(
-            f"{get_region(region).refresh_url.rsplit('/user/', 1)[0]}/user/status?Encode=1",
-            content=body,
-            headers=headers,
-        )
+        response = await client.post(region_config.user_status_url, content=body, headers=headers)
     if response.status_code != 200:
         raise RuntimeError(f"status HTTP {response.status_code} body={response.text}")
     return response.json()

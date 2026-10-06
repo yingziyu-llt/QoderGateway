@@ -87,6 +87,13 @@ def init_db():
         except Exception:
             pass
 
+        # personal_access_token 列：PAT 是唯一可以无限续期的凭据，必须持久化。
+        # 旧数据留空，刷新时会回退到 refresh_token。
+        try:
+            conn.execute("ALTER TABLE accounts ADD COLUMN personal_access_token TEXT")
+        except Exception:
+            pass
+
         # Region was added after the initial schema. Existing accounts remain
         # compatible and continue to use the international endpoint by default.
         try:

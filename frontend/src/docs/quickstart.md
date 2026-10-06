@@ -56,6 +56,8 @@ QODER_ADMIN_PASSWORD=your-strong-password
 
 For Qoder China, also set `QODER_REGION=cn` before adding a CN PAT. Use a `pt-` Personal Access Token from the matching region's integrations page; `dt-`, `drt-`, `jt-`, and `jrt-` values are session or job tokens.
 
+> **Token expiry**: `jt-`/`jrt-` session tokens expire. The gateway stores the PAT you import and re-exchanges it automatically before the token expires, so the account keeps working as long as the PAT itself is valid. Prefer **Add PAT** over Auto Import for this reason.
+
 This password protects all management routes under `/ui/*` with the `X-Gateway-Token` header.
 
 ## Manage Qoder Accounts
@@ -66,6 +68,8 @@ Use one of these options:
 - Paste a Qoder Personal Access Token into **Add PAT**.
 
 Imported accounts are stored in SQLite and deduplicated by `uid`.
+
+**Prefer Add PAT.** The gateway persists the PAT and re-exchanges it automatically whenever the short-lived token approaches expiry, so the account survives token rotation. Auto Import only captures an expiring session token; without a PAT, refresh falls back to a single-use `refresh_token`.
 
 ## First API Call
 

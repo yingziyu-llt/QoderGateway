@@ -71,6 +71,8 @@ QODER_REGION=cn
 
 CN PAT 从 `qoder.com.cn/account/integrations` 获取，国际区 PAT 从 `qoder.com/account/integrations` 获取。`dt-`、`drt-`、`jt-`、`jrt-` 是登录态或 job token，不是 PAT。
 
+**推荐用 Add PAT 导入。** 网关会把 PAT 一并存下来，并在 token 临近过期时自动重新兑换；只要 PAT 有效，账号就不会失效。Auto Import 拿到的是会过期的 session token，若手上没有 PAT，刷新只能靠 `refresh_token` 续一次。
+
 导入后的账号会存入本地 SQLite，并按 `uid` 自动去重。
 
 ## 完成第一次 API 调用

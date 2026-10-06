@@ -14,7 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .auth import SessionContext, create_session, load_local_session
+from .auth import SessionContext, create_session, load_local_session, normalize_pat
 from .bridge import complete_openai_response, stream_openai_response
 from .config import load_config, save_config
 from .database import get_db
@@ -30,6 +30,7 @@ from .accounts import (
 )
 from .registrar import get_registrar_status, start_registration, stop_registration
 from .tokens import (
+    ensure_fresh_token,
     refresh_all_account_tokens,
     refresh_one_account,
     get_account_quota,
@@ -244,11 +245,13 @@ async def get_session() -> SessionContext:
                         """
                         INSERT OR REPLACE INTO accounts (
                             uid, name, user_type, security_oauth_token, refresh_token, machine_id,
-                            enabled, last_status, last_error, region
-                        ) VALUES (?, ?, ?, ?, ?, ?, 1, 'ok', NULL, ?)
+                            enabled, last_status, last_error, region, token_expires_at, personal_access_token
+                        ) VALUES (?, ?, ?, ?, ?, ?, 1, 'ok', NULL, ?, ?, ?)
                         """,
                         (sess.identity.uid, sess.identity.name or "Environment PAT", sess.identity.user_type,
-                         sess.identity.security_oauth_token, sess.identity.refresh_token, sess.machine_id, sess.region)
+                         sess.identity.security_oauth_token, sess.identity.refresh_token, sess.machine_id,
+                         sess.region, sess.identity.expires_at or None,
+                         sess.identity.personal_access_token or normalize_pat(pat))
                     )
                 db_set_settings("active_uid", sess.identity.uid)
                 add_log(f"Imported environment PAT as account: {sess.identity.name}")
@@ -268,12 +271,21 @@ async def get_session() -> SessionContext:
                 add_log(f"Auto-import of local session failed: {exc}", "WARNING")
 
     try:
-        return get_active_session()
+        session = get_active_session()
     except Exception as exc:
         raise HTTPException(
             status_code=400,
             detail=f"No active session available: {exc}. Please configure/import an account first."
         )
+    # 惰性刷新：token 临近过期时先换新再路由，避免请求直接撞 401。
+    try:
+        if ensure_fresh_token(session.identity.uid):
+            # 内存中的 session 仍挟带旧 token，必须重新读取。
+            add_log(f"Refreshed token for {session.identity.uid}, reloading session.")
+            return get_active_session()
+    except Exception as exc:
+        add_log(f"Lazy token refresh check failed for {session.identity.uid}: {exc}", "WARNING")
+    return session
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -420,9 +432,20 @@ async def toggle_account(payload: dict[str, Any], verify: None = Depends(check_g
 
 @app.post("/ui/accounts/refresh-tokens")
 async def refresh_account_tokens(verify: None = Depends(check_gateway_token)) -> dict[str, Any]:
-    """手动触发：刷新所有账号的 token（drt- → deviceToken/refresh）。"""
+    """手动触发：刷新所有账号的 token（有 PAT 走 PAT 兑换，否则走 refresh_token）。"""
     result = refresh_all_account_tokens()
     add_log(f"Token refresh: ok={result['ok']} failed={result['failed']} total={result['total']}")
+    return {"status": "ok", **result}
+
+
+@app.post("/ui/accounts/{uid}/refresh-token")
+async def refresh_single_account_token(uid: str, verify: None = Depends(check_gateway_token)) -> dict[str, Any]:
+    """手动刷新单个账号（忽略到期检查）。"""
+    result = refresh_one_account(uid, force=True)
+    if not result.get("ok"):
+        add_log(f"Token refresh failed for {uid}: {result.get('error')}", "WARNING")
+        raise HTTPException(status_code=502, detail=result.get("error") or "token refresh failed")
+    add_log(f"Token refreshed for {uid}")
     return {"status": "ok", **result}
 
 
@@ -583,11 +606,13 @@ async def set_session(payload: dict[str, Any], verify: None = Depends(check_gate
                 """
                 INSERT OR REPLACE INTO accounts (
                     uid, name, user_type, security_oauth_token, refresh_token, machine_id,
-                    enabled, last_status, last_error, region
-                ) VALUES (?, ?, ?, ?, ?, ?, 1, 'ok', ?, ?)
+                    enabled, last_status, last_error, region, token_expires_at, personal_access_token
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, 'ok', ?, ?, ?, ?)
                 """,
                 (sess.identity.uid, sess.identity.name or "PAT Account", sess.identity.user_type,
-                 sess.identity.security_oauth_token, sess.identity.refresh_token, sess.machine_id, None, sess.region)
+                 sess.identity.security_oauth_token, sess.identity.refresh_token, sess.machine_id,
+                 None, sess.region, sess.identity.expires_at or None,
+                 sess.identity.personal_access_token or normalize_pat(pat))
             )
             
         db_set_settings("active_uid", sess.identity.uid)
@@ -599,6 +624,19 @@ async def set_session(payload: dict[str, Any], verify: None = Depends(check_gate
         msg = f"Failed to authenticate with provided PAT: {exc}"
         add_log(msg, "ERROR")
         raise HTTPException(status_code=502, detail=msg) from exc
+
+
+def _refresh_account_token_once(uid: str) -> bool:
+    """Try to renew an account's token once. Returns True on success."""
+    try:
+        result = refresh_one_account(uid, force=True)
+    except Exception as exc:
+        add_log(f"Token refresh attempt for {uid} raised {exc}", "WARNING")
+        return False
+    if result.get("ok"):
+        return True
+    add_log(f"Token refresh attempt for {uid} failed: {result.get('error')}", "WARNING")
+    return False
 
 
 def is_quota_error(exc: Exception) -> bool:
@@ -688,9 +726,12 @@ async def chat_completions(
     accounts_data = db_load_accounts()
     enabled_count = sum(1 for acc in accounts_data["accounts"] if acc.get("enabled", True))
     max_retries = max(1, enabled_count)
+    # A token refresh is not an account rotation: give the pool one extra pass so
+    # re-authenticating the currently active account can't exhaust the budget.
+    max_attempts = max_retries + 1
     last_quota_error = False
     
-    for attempt in range(max_retries):
+    for attempt in range(max_attempts):
         attempt_started = time.perf_counter()
         sess: SessionContext | None = None
         try:
@@ -735,7 +776,7 @@ async def chat_completions(
                             tokens_estimated=bool(usage_state.get("estimated")),
                         )
 
-                add_log(f"Streaming response initiated (Attempt {attempt+1}/{max_retries}).")
+                add_log(f"Streaming response initiated (Attempt {attempt+1}/{max_attempts}).")
                 return StreamingResponse(
                     stream_success_wrapper(first_item, gen),
                     media_type="text/event-stream",
@@ -747,7 +788,7 @@ async def chat_completions(
                     },
                 )
             else:
-                add_log(f"Generating full completion response (Attempt {attempt+1}/{max_retries})...")
+                add_log(f"Generating full completion response (Attempt {attempt+1}/{max_attempts})...")
                 resp = await complete_openai_response(payload, sess)
                 add_log("Completion request finished successfully.")
                 usage = resp.get("usage") or {}
@@ -798,6 +839,13 @@ async def chat_completions(
                         add_log(f"Quota check failed for {current_uid} ({q.get('error')}), not rotating.", "WARNING")
                         raise HTTPException(status_code=502, detail=safe_detail)
                 else:
+                    # 认证类错误（401/403）先尝试用 PAT / refresh_token 换一次 token，
+                    # 成功则原地重试当前账号，避免无谓地轮换掉一个其实可恢复的账号。
+                    if _upstream_status(exc) in (401, 403):
+                        refreshed = _refresh_account_token_once(current_uid)
+                        if refreshed:
+                            add_log(f"Token refreshed for {current_uid} after upstream {_upstream_status(exc)}; retrying.", "WARNING")
+                            continue
                     add_log(f"Account-level error on {current_uid}: {exc}. Rotating to next account...", "WARNING")
                 try:
                     rotate_next_account(current_uid, str(exc))
@@ -819,7 +867,7 @@ async def chat_completions(
 def main() -> None:
     import uvicorn
 
-    start_refresh_loop()  # 启动 token 定时刷新线程（每 6 小时）
+    start_refresh_loop()  # 启动 token 定时刷新线程（按 token_expires_at 到期刷新）
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default=os.getenv("QODER_HOST", "127.0.0.1"))

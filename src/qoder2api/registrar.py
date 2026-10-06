@@ -29,15 +29,25 @@ from typing import Any
 
 import httpx
 
-from .accounts import db_get_settings, db_set_settings
 from .database import get_db
 from .env import httpx_client_kwargs, load_dotenv
+from .regions import configured_region, get_region, normalize_region
 
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
 YYDS_API = "https://maliapi.215.im/v1"
 REGISTER_URL = "https://qoder.com/users/sign-up"
+
+
+def register_url(region: str | None = None) -> str:
+    """Signup page for the region.
+
+    The device flow in :func:`device_flow_params` follows ``QODER_REGION``, so
+    signup must follow the same host or the resulting account would belong to
+    a different site than the credentials we harvest.
+    """
+    return f"{get_region(region or configured_region()).web_url}/users/sign-up"
 SUCCESS_URL_MARK = "/download"
 DEVICE_CLIENT_ID = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb"
 DEVICE_VERIFIER_CHARS = string.ascii_letters + string.digits + "-._~"
@@ -221,21 +231,29 @@ def yyds_wait_code(address: str, task_id: str | None = None, timeout: float = 12
 # ---------------------------------------------------------------------------
 # Device flow（来自 qodercli 逆向：docs/qoder-protocol-research.md §4）
 # ---------------------------------------------------------------------------
-def device_flow_params(machine_id: str | None = None) -> dict:
+def device_flow_params(machine_id: str | None = None, region: str | None = None) -> dict:
+    region_name = normalize_region(region or configured_region())
+    config = get_region(region_name)
     length = random.randint(43, 128)
     verifier = "".join(random.choices(DEVICE_VERIFIER_CHARS, k=length))
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
     nonce = str(uuid.uuid4())
     mid = machine_id or str(uuid.uuid4())
     auth_url = (
-        f"https://qoder.com/device/selectAccounts?challenge={challenge}"
+        f"{config.web_url}/device/selectAccounts?challenge={challenge}"
         f"&challenge_method=S256&nonce={nonce}&machine_id={mid}&client_id={DEVICE_CLIENT_ID}"
     )
     poll_url = (
-        f"https://openapi.qoder.sh/api/v1/deviceToken/poll"
+        f"{config.openapi_url}/api/v1/deviceToken/poll"
         f"?nonce={nonce}&verifier={verifier}&challenge_method=S256"
     )
-    return {"verifier": verifier, "nonce": nonce, "auth_url": auth_url, "poll_url": poll_url}
+    return {
+        "verifier": verifier,
+        "nonce": nonce,
+        "machine_id": mid,
+        "auth_url": auth_url,
+        "poll_url": poll_url,
+    }
 
 
 def poll_device_token(poll_url: str, task_id: str | None = None, timeout: float = 300.0, proxy: str | None = None) -> dict:
@@ -472,7 +490,7 @@ class RegistrarBot:
         password = _random_password()
         _log(tid, f"[reg] name={first} {last}  mail={address}")
 
-        self._open_hidden(REGISTER_URL)
+        self._open_hidden(register_url())
         self._locate("#basic_firstName", timeout=60, displayed=True, desc="注册页姓输入框")
         _log(tid, "[reg] page loaded (hidden)")
 
@@ -546,7 +564,7 @@ class RegistrarBot:
     def device(self) -> dict:
         page = self.page
         tid = self.task_id
-        flow = device_flow_params()
+        flow = device_flow_params(region=configured_region())
         _log(tid, f"[dev] auth URL:\n  {flow['auth_url']}")
 
         self._open_hidden(flow["auth_url"])  # 全程隐藏，不弹窗
@@ -588,6 +606,8 @@ class RegistrarBot:
             "token": cred.get("token"),
             "refresh_token": cred.get("refresh_token"),
             "user_id": cred.get("user_id"),
+            "machine_id": flow.get("machine_id"),
+            "region": configured_region(),
             "expires_at": cred.get("expires_at"),
             "refresh_token_expires_at": cred.get("refresh_token_expires_at"),
         }
@@ -742,7 +762,8 @@ def _save_account(task_id: str, acct: dict, cred: dict) -> str:
     uid = cred.get("user_id") or ""
     if not uid:
         raise ValueError("device 凭据缺少 user_id，无法入库")
-    machine_id = str(uuid.uuid4())
+    machine_id = str(cred.get("machine_id") or "").strip() or str(uuid.uuid4())
+    region = normalize_region(cred.get("region") or configured_region())
     with get_db() as conn:
         existing = conn.execute("SELECT enabled FROM accounts WHERE uid = ?", (uid,)).fetchone()
         enabled = existing[0] if existing else 1
@@ -750,16 +771,23 @@ def _save_account(task_id: str, acct: dict, cred: dict) -> str:
             """
             INSERT OR REPLACE INTO accounts (
                 uid, name, user_type, security_oauth_token, refresh_token, machine_id,
-                enabled, last_status, last_error, quota, is_quota_exceeded, plan, user_tag, next_reset_at, token_expires_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ok', NULL, 0, 0, 'PLAN_TIER_PRO_TRIAL', 'Pro Trial', NULL, ?)
+                enabled, last_status, last_error, quota, is_quota_exceeded, plan, user_tag,
+                next_reset_at, token_expires_at, region
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ok', NULL, 0, 0, 'PLAN_TIER_PRO_TRIAL', 'Pro Trial', NULL, ?, ?)
             """,
             (
                 uid, acct.get("name") or "Registered", "personal_standard",
                 cred.get("token", ""), cred.get("refresh_token", ""), machine_id,
-                enabled, cred.get("expires_at") or "",
+                enabled, cred.get("expires_at") or "", region,
             ),
         )
-        if not db_get_settings("active_uid"):
-            db_set_settings("active_uid", uid)
-    _log(task_id, f"[registrar] account saved to DB: {uid} ({acct.get('email')})")
+        # Same connection as the INSERT above: a nested get_db() write would
+        # deadlock on the transaction this block already holds.
+        active = conn.execute("SELECT value FROM settings WHERE key = 'active_uid'").fetchone()
+        if not active:
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('active_uid', ?)",
+                (uid,),
+            )
+    _log(task_id, f"[registrar] account saved to DB: {uid} ({acct.get('email')}, region={region})")
     return uid

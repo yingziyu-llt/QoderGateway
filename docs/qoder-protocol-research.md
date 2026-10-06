@@ -231,12 +231,33 @@ const _$d = (s, k = "syJkkdK5Dxwd") => {
 
 - `verifier` + `nonce` 组合等于兑换凭证：poll URL 泄露给第三方可导致账号 token 被冒领，**不得外传**。
 - `dt-` / `drt-` token 已明文存入 `~/.qoder/qoder2api.db`，该库 = 完整登录身份，注意文件权限与备份。
-- QoderGateway 目前**未实现** token 自动刷新；`dt-` 过期后需用 `POST openapi.qoder.sh/api/v1/jobToken/refresh`（body `{"refresh_token": "<drt-...>"}`）换新后更新数据库。
+- `dt-` / `drt-` / `jt-` / `jrt-` 等 session token 会过期；**只有 PAT（`pt-`）能无限续期**，因此 PAT 也会一并入库（`personal_access_token` 列）。
+
+### Token 自动刷新（已实现）
+
+优先级：**有 PAT 就用 PAT 重新兑换，否则才用 refresh_token**。
+
+| 凭据 | 刷新方式 |
+| --- | --- |
+| `pt-`（PAT） | `POST {openapi}/api/v1/jobToken/exchange`，body `{"personal_token": "<pt-...>"}` |
+| `jrt-`（job token） | `POST {openapi}/api/v1/jobToken/refresh`，body `{"refresh_token": "<jrt-...>"}` |
+| `drt-`（device token） | `POST {openapi}/api/v1/deviceToken/refresh`，body 额外带 `machine_id` / `machine_token` |
+
+`{openapi}` 按区域选择：国际 `openapi.qoder.sh`，中国 `openapi.qoder.com.cn`。
+
+> ⚠️ **不要**刷新到 `gateway.qoder.com.cn/algo/api/v3/user/refresh_token`——该端点不存在，实测返回 `403 Request discarded`。CN 客户端的刷新走 `openapi.qoder.com.cn` 的 `/api/v1/jobToken/refresh`。
+
+刷新时机：
+
+1. **请求前惰性刷新**：`ensure_fresh_token()` 在 token 进入 `token_expires_at - 5min` 窗口时同步换新。
+2. **后台定时线程**：按最近一个到期时间休眠（上限 6 小时），到点刷新所有进入窗口的账号。
+3. **上游 401/403 兜底**：换新成功后原地重试当前账号，而不是立刻丢弃。
+4. **手动**：`POST /ui/accounts/refresh-tokens`（全部）或 `/ui/accounts/{uid}/refresh-token`（单个）。
 
 ---
 
 ## 9. 后续可做（未实施）
 
 - [ ] QoderGateway 增加新版协议适配：`bridge.py` 新增 `api2-v2.qoder.sh/model/v1/chat/completions` 路径（纯 Bearer，无需 COSY 签名）
-- [ ] 增加 token 自动刷新：定时/请求前检查 `expires_at`，用 `jobToken/refresh` 换新并回写数据库
+- [x] 增加 token 自动刷新：定时/请求前检查 `expires_at`，用 PAT 兑换或 `jobToken/refresh` 换新并回写数据库（见 §8）
 - [ ] 自动化 device flow 脚本：生成 verifier/challenge → 打印授权 URL → 轮询 poll → 拿到凭据自动入库

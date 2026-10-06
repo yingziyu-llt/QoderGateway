@@ -21,7 +21,9 @@ User/client
 | --- | --- |
 | `app.py` | FastAPI routes, UI auth, request routing. |
 | `accounts.py` | SQLite account CRUD and active session selection. |
-| `auth.py` | PAT exchange, local auth import, quota query. |
+| `auth.py` | PAT exchange, local auth import, regional protocol constants. |
+| `tokens.py` | Automatic token refresh (PAT exchange / refresh_token) and quota queries. |
+| `regions.py` | Regional endpoints (global/cn) and COSY versions. |
 | `bridge.py` | OpenAI-compatible stream and response conversion. |
 | `signature.py` | Bearer signing implementation. |
 | `database.py` | SQLite schema and connection helpers. |

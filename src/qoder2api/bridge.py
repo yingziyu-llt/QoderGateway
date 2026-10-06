@@ -638,7 +638,7 @@ async def qoder_stream_lines(sess: SessionContext, body: dict[str, Any], model: 
         "Authorization": f"Bearer {sess.identity.security_oauth_token}",
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
-        "User-Agent": "qoder/1.1.16",
+        "User-Agent": "qoder/1.1.65",
         "X-Request-ID": ctx.get("request_id", ""),
         "X-Session-ID": ctx.get("session_id", ""),
     }

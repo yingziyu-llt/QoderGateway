@@ -14,7 +14,8 @@ class RegionConfig:
     modern_chat_url: str | None
     model_list_url: str
     quota_url: str
-    refresh_url: str
+    user_status_url: str
+    web_url: str
     cosy_version: str
     data_policy: str
 
@@ -30,7 +31,8 @@ REGIONS = {
         modern_chat_url="https://api2-v2.qoder.sh/model/v1/chat/completions",
         model_list_url="https://api3.qoder.sh/algo/api/v2/model/list?Encode=1",
         quota_url="https://openapi.qoder.sh/api/v2/quota/usage",
-        refresh_url="https://center.qoder.sh/algo/api/v3/user/refresh_token",
+        user_status_url="https://center.qoder.sh/algo/api/v3/user/status?Encode=1",
+        web_url="https://qoder.com",
         cosy_version="0.1.43",
         data_policy="AGREE",
     ),
@@ -44,7 +46,8 @@ REGIONS = {
         modern_chat_url=None,
         model_list_url="https://gateway.qoder.com.cn/algo/api/v2/model/list?Encode=1",
         quota_url="https://openapi.qoder.com.cn/api/v2/quota/usage",
-        refresh_url="https://gateway.qoder.com.cn/algo/api/v3/user/refresh_token",
+        user_status_url="https://gateway.qoder.com.cn/algo/api/v3/user/status?Encode=1",
+        web_url="https://qoder.cn",
         cosy_version="1.1.38",
         data_policy="disagree",
     ),
